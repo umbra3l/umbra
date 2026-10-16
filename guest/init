@@ -1,0 +1,45 @@
+#!/bin/bash
+# umbra guest wrapper -- runs inside the VM as your uid, right after
+# umbra-init has dropped privileges, and execs the tool.
+#
+#   /run/umbra/guest/init <command> [args...]
+#
+# Only job: optionally give the tool a *private* Secret Service (its own
+# D-Bus session bus + its own gnome-keyring, persisted in the tool's sandbox
+# home). The host session bus and host keyrings are never reachable.
+#
+# Why: Claude Code's background token-refresh daemon talks to the freedesktop
+# Secret Service. With none at all it marks the session auth_required and
+# forces a fresh login (observed in ai-sandbox v1). A private,
+# empty-password keyring satisfies it without exposing anything.
+set -u
+
+# umbra-init already set the environment from /run/umbra/env; this covers
+# being started some other way (e.g. by hand from `umbra shell`).
+if [ -z "${UMBRA_ENV_LOADED:-}" ] && [ -r /run/umbra/env ]; then
+    while IFS= read -r -d '' kv; do
+        case "$kv" in
+        [A-Za-z_]*=*) export "$kv" ;;
+        esac
+    done </run/umbra/env
+    export UMBRA_ENV_LOADED=1
+fi
+
+if [ "${UMBRA_KEYRING:-0}" = 1 ] && [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] \
+    && command -v dbus-run-session >/dev/null 2>&1 \
+    && command -v gnome-keyring-daemon >/dev/null 2>&1; then
+    # Re-enter under a private session bus. dbus-run-session propagates the
+    # child's exit status and tears the bus down when the tool exits.
+    exec dbus-run-session -- "$0" "$@"
+fi
+
+if [ "${UMBRA_KEYRING:-0}" = 1 ] && [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+    mkdir -p "$HOME/.local/share/keyrings"
+    # --unlock reads the password from stdin: an empty line creates (first
+    # run) or unlocks (later runs) the "login" keyring in the sandbox home.
+    printf '\n' | gnome-keyring-daemon --unlock --components=secrets >/dev/null 2>&1 || true
+    eval "$(gnome-keyring-daemon --start --components=secrets 2>/dev/null)" || true
+    export GNOME_KEYRING_CONTROL
+fi
+
+exec "$@"

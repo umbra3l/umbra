@@ -1,0 +1,1475 @@
+#!/usr/bin/env bash
+# umbra v2 -- run AI coding CLIs (claude, agy, opencode) in a microVM that
+# feels native: your project at its real path, your uid, persistent per-tool
+# auth, clipboard/browser/editor/git working -- and between the agent and
+# your laptop, a separate kernel, a jailed VMM, an egress policy that asks you
+# about new domains, and an automatic undo snapshot of the project.
+#
+#   agent ─ guest kernel ─ libkrun VMM ─ bwrap jail ─ netns+nft ─ your host
+#
+# `umbra help` for usage. Architecture and threat model: README.md.
+set -euo pipefail
+shopt -s nullglob
+
+UMBRA_ROOT="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." && pwd -P)"
+UMBRA_VERSION="2.0.0"
+G=/guest  # where the guest's root tree is assembled inside the jail
+
+die() { printf 'umbra: %s\n' "$*" >&2; exit 1; }
+warn() { printf 'umbra: %s\n' "$*" >&2; }
+info() { [ "${UMBRA_QUIET:-0}" = 1 ] || printf '\033[2mumbra: %s\033[0m\n' "$*" >&2; }
+
+# ------------------------------------------------------------------ config --
+# umbra.local.conf (gitignored) holds this machine's settings and is read
+# first; umbra.conf then fills in whatever it left unset.
+if [ -f "$UMBRA_ROOT/umbra.local.conf" ]; then
+    # shellcheck source=/dev/null
+    source "$UMBRA_ROOT/umbra.local.conf"
+fi
+if [ -f "$UMBRA_ROOT/umbra.conf" ]; then
+    # shellcheck source=../umbra.conf
+    source "$UMBRA_ROOT/umbra.conf"
+fi
+: "${UMBRA_NET:=ask}"
+: "${UMBRA_ALLOW_LAN:=0}"
+: "${UMBRA_CLIPBOARD:=bridge}"
+: "${UMBRA_GIT_PROTECT:=1}"
+: "${UMBRA_GH:=0}"
+: "${UMBRA_GIT_ROOT:=1}"
+: "${UMBRA_SNAPSHOT:=1}"
+: "${UMBRA_SNAPSHOT_KEEP:=20}"
+: "${UMBRA_VM_CPUS:=4}"
+: "${UMBRA_VM_RAM:=4096}"
+: "${UMBRA_SECCOMP:=1}"
+: "${UMBRA_HOSTNET_OK:=1}"
+: "${UMBRA_EXCLUSIVE:=0}"
+: "${UMBRA_STATE:=${XDG_DATA_HOME:-$HOME/.local/share}/umbra}"
+: "${UMBRA_V1_DIR:=$HOME/.local/share/ai-sandbox}"
+[ -n "${UMBRA_RO_BINDS+x}" ] || UMBRA_RO_BINDS=()
+[ -n "${UMBRA_RW_BINDS+x}" ] || UMBRA_RW_BINDS=()
+[ -n "${UMBRA_PASS_ENV+x}" ] || UMBRA_PASS_ENV=()
+
+# shellcheck source=../lib/tools.sh
+source "$UMBRA_ROOT/lib/tools.sh"
+
+BUILD="$UMBRA_ROOT/build"
+EGRESS_LOG="$UMBRA_STATE/logs/egress.log"
+MY_UID="$(id -u)"
+MY_GID="$(id -g)"
+[ "$MY_UID" != 0 ] || die "refusing to run as root; umbra runs as your user"
+
+# setting NAME TOOL -> $UMBRA_NAME_TOOL if set, else $UMBRA_NAME
+setting() {
+    local scoped="UMBRA_${1}_${2}" global="UMBRA_${1}"
+    if [ -n "${!scoped+x}" ]; then printf '%s' "${!scoped}"; else printf '%s' "${!global:-}"; fi
+}
+
+# tool_array NAME TOOL -> elements of the array UMBRA_NAME_TOOL, NUL-separated
+# (per-tool additions such as UMBRA_RO_BINDS_opencode=(...)).
+tool_array() {
+    local var="UMBRA_${1}_${2}"
+    declare -p "$var" >/dev/null 2>&1 || return 0
+    local -n _ref="$var"
+    [ ${#_ref[@]} -gt 0 ] && printf '%s\0' "${_ref[@]}"
+    return 0
+}
+
+is_tool() {
+    local t
+    for t in "${UMBRA_TOOLS[@]}"; do [ "$t" = "$1" ] && return 0; done
+    return 1
+}
+
+# -------------------------------------------------------- path policy ------
+# Never mounted read-write: credential stores, and everything the host
+# executes (shell config, systemd units, autostart, ~/.local/bin, umbra
+# itself) -- a write there would be code execution outside the sandbox.
+sensitive_paths() {
+    printf '%s\n' \
+        "$HOME/.ssh" "$HOME/.gnupg" "$HOME/.config" "$HOME/.local" "$HOME/.cache" \
+        "$HOME/.mozilla" "$HOME/.var" "$HOME/.pki" "$HOME/.password-store" \
+        "$HOME/.aws" "$HOME/.azure" "$HOME/.kube" "$HOME/.docker" \
+        "$HOME/.cargo" "$HOME/.rustup" "$HOME/.bun" "$HOME/.npm" "$HOME/.opencode" \
+        "$HOME/.claude" "$HOME/.gemini" \
+        "$UMBRA_ROOT" "$UMBRA_STATE" "$UMBRA_V1_DIR"
+}
+
+# mount_refusal PATH -> why PATH may not be mounted read-write ("" if it may)
+mount_refusal() {
+    local p="$1" s
+    case "$p" in
+    / | /home | /root | /etc | /usr | /var | /opt | /boot | /srv | /run | /proc | /sys | /dev | /tmp | /mnt | /media)
+        echo "a system directory"; return ;;
+    esac
+    if [ "$p" = "$HOME" ]; then echo "your home directory"; return; fi
+    case "$HOME/" in "$p"/*) echo "a parent of your home directory"; return ;; esac
+    while IFS= read -r s; do
+        [ -n "$s" ] || continue
+        s="$(readlink -m -- "$s")"
+        case "$p/" in "$s"/*) echo "inside $s"; return ;; esac
+        case "$s/" in "$p"/*) echo "a parent of $s"; return ;; esac
+    done < <(sensitive_paths)
+}
+
+# ----------------------------------------------------------- arguments -----
+OPT_NET="" OPT_CLIPBOARD="" OPT_GH="" OPT_WORKSPACE="" OPT_FORCE=0
+OPT_GIT_PROTECT="" OPT_VERBOSE=0 OPT_NO_WORKSPACE=0 OPT_EPHEMERAL=0 OPT_SNAPSHOT=""
+OPT_RO=() OPT_RW=()
+
+parse_run_opts() {
+    REST=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        --net=*) OPT_NET="${1#*=}" ;;
+        --clipboard=*) OPT_CLIPBOARD="${1#*=}" ;;
+        --gh) OPT_GH=1 ;;
+        --no-gh) OPT_GH=0 ;;
+        --workspace=*) OPT_WORKSPACE="${1#*=}" ;;
+        --no-workspace) OPT_NO_WORKSPACE=1 ;;
+        --ro=*) OPT_RO+=("${1#*=}") ;;
+        --rw=*) OPT_RW+=("${1#*=}") ;;
+        --ephemeral) OPT_EPHEMERAL=1 ;;
+        --no-snapshot) OPT_SNAPSHOT=0 ;;
+        --force) OPT_FORCE=1 ;;
+        --no-git-protect) OPT_GIT_PROTECT=0 ;;
+        -v | --verbose) OPT_VERBOSE=1 ;;
+        --) shift; break ;;
+        -*) die "unknown option: $1 (see 'umbra help')" ;;
+        *) break ;;
+        esac
+        shift
+    done
+    REST=("$@")
+}
+
+# ------------------------------------------------------------- runtime -----
+RT=""            # per-session runtime dir (host side)
+BG_PGIDS=()      # helper process groups to kill on exit
+CHILD=""         # the network wrapper / jail / VM process tree
+STTY_SAVED=""    # terminal settings to restore (a killed VMM can't)
+EPHEMERAL_HOME=""
+LOCK_FD=""
+SNAPSHOT=""
+
+cleanup() {
+    local pg i
+    if [ -n "$CHILD" ] && kill -0 "$CHILD" 2>/dev/null; then
+        # pasta / bwrap tear the jail and VM down with them (--die-with-parent,
+        # pdeathsig, pid namespace).
+        kill -TERM "$CHILD" 2>/dev/null || true
+        for i in $(seq 1 50); do kill -0 "$CHILD" 2>/dev/null || break; sleep 0.05; done
+        kill -KILL "$CHILD" 2>/dev/null || true
+    fi
+    if [ -n "$STTY_SAVED" ]; then stty "$STTY_SAVED" 2>/dev/null || true; fi
+    [ -n "$RT" ] && reset_stdio_blocking
+    for pg in "${BG_PGIDS[@]}"; do
+        kill -TERM -- "-$pg" 2>/dev/null || true
+    done
+    if [ -n "$RT" ] && [ -d "$RT" ]; then rm -rf -- "$RT"; fi
+    if [ -n "$EPHEMERAL_HOME" ] && [ -d "$EPHEMERAL_HOME" ]; then rm -rf -- "$EPHEMERAL_HOME"; fi
+}
+
+make_runtime_dir() {
+    local base="${XDG_RUNTIME_DIR:-$UMBRA_STATE/run}/umbra" d pid
+    mkdir -p -m 0700 -- "$base"
+    # Sweep runtime dirs of sessions that were SIGKILLed (no trap ran); they
+    # may hold that session's environment file.
+    for d in "$base"/*/; do
+        pid="$(cat "$d/pid" 2>/dev/null || true)"
+        if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then rm -rf -- "$d"; fi
+    done
+    RT="$(mktemp -d -p "$base" "$1.XXXXXX")"
+    chmod 0700 -- "$RT"
+    echo "$$" >"$RT/pid"
+    mkdir -p -m 0700 -- "$RT/io/in" "$RT/io/out"
+    (umask 077 && : >"$RT/env" && : >"$RT/vm.conf")
+    trap cleanup EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
+    trap 'exit 141' PIPE
+}
+
+# libkrun switches the terminal it is given to O_NONBLOCK. That flag lives on
+# the open file description shared with whoever launched us (your shell, the
+# TUI), so it outlives the VM: the next program's large writes then come up
+# short and escape sequences get torn (garbled TUI, "?2026h" on screen).
+# Restore blocking mode on our stdio after every VM exit.
+reset_stdio_blocking() {
+    python3 -I -c '
+import fcntl, os
+for fd in (0, 1, 2):
+    try:
+        fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)
+    except OSError:
+        pass' 2>/dev/null || true
+}
+
+# Guest environment and VM config are NUL-separated files, never command
+# line arguments: /proc/<pid>/cmdline is world-readable on the host, and
+# libkrun would put exec env on the guest kernel command line.
+genv() { printf '%s=%s\0' "$1" "$2" >>"$RT/env"; }
+vmconf() { printf '%s=%s\0' "$1" "$2" >>"$RT/vm.conf"; }
+
+# Guest-tree bind helpers (destination is the guest path).
+g_ro() { BW+=(--ro-bind "$1" "$G$2"); }
+g_rw() { BW+=(--bind "$1" "$G$2"); }
+
+# Host-side helper for the file-based bridges in $RT/io:
+#   clipboard: images host->guest (in/latest.png + in/has-image), anything
+#              guest->host (out/clipboard.new, out/primary.new)
+#   browser:   guest xdg-open drops out/url.*; http(s) only, opened here
+start_io_bridge() {
+    local in="$RT/io/in" out="$RT/io/out" clip=0
+    if [ "$CLIPBOARD" = bridge ] && [ -n "${WAYLAND_DISPLAY:-}" ] \
+        && command -v wl-paste >/dev/null 2>&1 && command -v wl-copy >/dev/null 2>&1; then
+        clip=1
+    fi
+    # wl-paste calls are bounded by timeout: a compositor can hand out a
+    # stale offer whose source is gone (observed in v1).
+    local paste_once='
+        tmp="$UMBRA_IO_IN/latest.png.tmp"
+        if timeout 2 wl-paste --list-types 2>/dev/null | grep -qx image/png \
+           && timeout 2 wl-paste -t image/png -n >"$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+            mv -f "$tmp" "$UMBRA_IO_IN/latest.png" && : >"$UMBRA_IO_IN/has-image"
+        else
+            rm -f "$tmp" "$UMBRA_IO_IN/has-image"
+        fi'
+    # wl-copy gets its own session so the selection survives this helper.
+    local out_loop='
+        push() {
+            local f="$1"; shift
+            [ -f "$f" ] || return 0
+            if [ "$UMBRA_IO_CLIP" = 1 ]; then
+                if [ "$(head -c 8 "$f" | od -An -tx1 | tr -d " \n")" = 89504e470d0a1a0a ]; then
+                    timeout 2 setsid wl-copy "$@" -t image/png <"$f"
+                else
+                    timeout 2 setsid wl-copy "$@" <"$f"
+                fi
+            fi
+            rm -f "$f"
+        }
+        while :; do
+            push "$UMBRA_IO_OUT/clipboard.new"
+            push "$UMBRA_IO_OUT/primary.new" --primary
+            for f in "$UMBRA_IO_OUT"/url.*; do
+                [ -f "$f" ] || continue
+                url="$(head -c 8192 "$f" | head -n1)"
+                rm -f "$f"
+                [[ $url =~ ^https?://[^[:space:][:cntrl:]]+$ ]] || continue
+                command -v xdg-open >/dev/null && setsid xdg-open "$url" </dev/null >/dev/null 2>&1 &
+            done
+            sleep 0.15
+        done'
+    # The supervisor exits (taking its whole process group with it) as soon
+    # as this umbra process is gone, however it died -- no orphaned helpers.
+    UMBRA_IO_IN="$in" UMBRA_IO_OUT="$out" UMBRA_IO_CLIP="$clip" PASTE_ONCE="$paste_once" OUT_LOOP="$out_loop" \
+        UMBRA_PARENT="$$" setsid bash -c '
+            shopt -s nullglob
+            if [ "$UMBRA_IO_CLIP" = 1 ]; then
+                (while :; do wl-paste --watch bash -c "$PASTE_ONCE"; sleep 0.5; done) &
+            fi
+            (eval "$OUT_LOOP") &
+            while kill -0 "$UMBRA_PARENT" 2>/dev/null; do sleep 1; done
+            kill -TERM 0' </dev/null >/dev/null 2>&1 8>&- &
+    BG_PGIDS+=("$!")
+    g_ro "$in" /run/umbra/io/in
+    g_rw "$out" /run/umbra/io/out
+    if [ "$clip" = 1 ]; then
+        CLIP_PATH="/run/umbra/guest/clip:"
+        genv DISPLAY :0  # Claude Code only probes xclip when DISPLAY is set
+    fi
+    genv BROWSER /run/umbra/guest/bin/xdg-open
+}
+
+start_egress_proxy() {
+    local mode="$1" i
+    mkdir -p -- "$(dirname -- "$EGRESS_LOG")" "$UMBRA_ROOT/egress"
+    setsid python3 -I "$UMBRA_ROOT/lib/egress.py" --tool "$TOOL" --mode "$mode" \
+        --port-file "$RT/proxy.port" --log "$EGRESS_LOG" \
+        --list-dir "$UMBRA_ROOT/egress" --user-dir "$UMBRA_ROOT/egress" --parent-pid "$$" \
+        </dev/null >/dev/null 2>"$RT/proxy.err" 8>&- &
+    BG_PGIDS+=("$!")
+    for i in $(seq 1 150); do
+        [ -s "$RT/proxy.port" ] && break
+        sleep 0.02
+    done
+    PROXY_PORT="$(cat "$RT/proxy.port" 2>/dev/null || true)"
+    [ -n "$PROXY_PORT" ] || die "egress proxy failed to start: $(cat "$RT/proxy.err" 2>/dev/null)"
+    local url="http://127.0.0.1:$PROXY_PORT" v
+    for v in HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; do genv "$v" "$url"; done
+    genv NO_PROXY "localhost,127.0.0.1,::1"
+    genv no_proxy "localhost,127.0.0.1,::1"
+    # Node.js only honors the proxy variables for fetch() with this set.
+    genv NODE_USE_ENV_PROXY 1
+}
+
+# Sandbox-only global gitconfig: identity and a few harmless preferences;
+# never credential helpers, hooksPath, sshCommand, includes or aliases.
+write_gitconfig() {
+    local f="$RT/gitconfig" key val
+    : >"$f"
+    if command -v git >/dev/null 2>&1; then
+        for key in user.name user.email init.defaultBranch core.editor core.autocrlf \
+            pull.rebase pull.ff push.default push.autoSetupRemote fetch.prune \
+            merge.conflictStyle diff.algorithm rebase.autoStash rerere.enabled color.ui; do
+            if val="$(git config --global --get "$key" 2>/dev/null)"; then
+                git config --file "$f" "$key" "$val"
+            fi
+        done
+        git config --file "$f" commit.gpgSign false
+        git config --file "$f" tag.gpgSign false
+        if [ "$GH" = 1 ]; then
+            git config --file "$f" credential.https://github.com.helper '!gh auth git-credential'
+            git config --file "$f" credential.https://gist.github.com.helper '!gh auth git-credential'
+        fi
+    fi
+    chmod 0444 -- "$f"
+    g_ro "$f" /run/umbra/gitconfig
+    genv GIT_CONFIG_GLOBAL /run/umbra/gitconfig
+}
+
+# nftables policy for the VMM's network namespace. Rejections are active
+# (TCP reset / ICMP): libkrun's TSI blocks on a connect() that never gets an
+# answer, so silently dropped packets would stall the guest's networking.
+write_nft_rules() {
+    if [ "$1" = proxy ]; then
+        # ask/strict: the only way out is the egress proxy, forwarded by
+        # pasta on loopback. No DNS, no direct connections.
+        cat >"$RT/nft.rules" <<'EOF'
+table inet umbra {
+    chain output {
+        type filter hook output priority filter; policy accept;
+        oif "lo" accept
+        ct state established,related accept
+        meta l4proto tcp counter reject with tcp reset
+        counter reject
+    }
+}
+EOF
+    else
+        # open: internet yes; LAN, CGNAT, link-local/metadata, multicast no.
+        cat >"$RT/nft.rules" <<'EOF'
+define PRIV4 = { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16,
+                 172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15,
+                 224.0.0.0/4, 240.0.0.0/4 }
+define PRIV6 = { ::1/128, fc00::/7, fe80::/10, ff00::/8 }
+table inet umbra {
+    chain output {
+        type filter hook output priority filter; policy accept;
+        oif "lo" accept
+        ct state established,related accept
+        ip daddr 169.254.1.1 udp dport 53 accept
+        ip daddr 169.254.1.1 tcp dport 53 accept
+        meta l4proto ipv6-icmp accept
+        ip daddr $PRIV4 meta l4proto tcp counter reject with tcp reset
+        ip daddr $PRIV4 counter reject
+        ip6 daddr $PRIV6 meta l4proto tcp counter reject with tcp reset
+        ip6 daddr $PRIV6 counter reject
+    }
+}
+EOF
+    fi
+}
+
+add_layout() {
+    # $1 = prefix ("" for the VMM's own view, $G for the guest tree)
+    local pre="$1" d
+    for d in /bin /sbin /lib /lib64 /lib32; do
+        if [ -L "$d" ]; then
+            BW+=(--symlink "$(readlink -- "$d")" "$pre$d")
+        elif [ -d "$d" ]; then
+            BW+=(--ro-bind "$d" "$pre$d")
+        fi
+    done
+}
+
+add_env_passthrough() {
+    local n p
+    local -a patterns=("${UMBRA_PASS_ENV[@]}")
+    mapfile -d '' -t -O "${#patterns[@]}" patterns < <(tool_array PASS_ENV "$TOOL")
+    for n in TERM COLORTERM TERM_PROGRAM TERM_PROGRAM_VERSION TERMINFO TERMINFO_DIRS \
+        VTE_VERSION COLORFGBG KITTY_WINDOW_ID WEZTERM_PANE GHOSTTY_RESOURCES_DIR \
+        LANG LANGUAGE TZ EDITOR VISUAL PAGER LESS; do
+        [ -n "${!n:-}" ] && genv "$n" "${!n}"
+    done
+    [ -n "${TERM:-}" ] || genv TERM xterm-256color
+    while IFS= read -r n; do
+        case "$n" in
+        LC_*) genv "$n" "${!n}"; continue ;;
+        esac
+        for p in "${patterns[@]}"; do
+            # shellcheck disable=SC2053 # glob match is intended
+            if [[ $n == $p ]]; then
+                genv "$n" "${!n}"
+                break
+            fi
+        done
+    done < <(compgen -e)
+}
+
+# Per-tool secrets: $UMBRA_ROOT/secrets/<tool>.env (KEY=VALUE lines) goes into
+# that tool's VM environment and nowhere else. Refused unless only you can
+# read it.
+load_tool_secrets() {
+    local f="$UMBRA_ROOT/secrets/$TOOL.env" mode owner line key val n=0
+    [ -f "$f" ] || return 0
+    mode="$(stat -c %a -- "$f")"
+    owner="$(stat -c %u -- "$f")"
+    if [ "$owner" != "$MY_UID" ] || { [ "$mode" != 600 ] && [ "$mode" != 400 ]; }; then
+        warn "ignoring $f: must be owned by you with mode 600 (chmod 600 '$f')"
+        return 0
+    fi
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line#"${line%%[![:space:]]*}"}"
+        case "$line" in '' | '#'*) continue ;; esac
+        key="${line%%=*}"
+        val="${line#*=}"
+        [[ $key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && [ "$key" != "$line" ] || {
+            warn "$f: skipping a malformed line"
+            continue
+        }
+        case "$val" in \"*\") val="${val:1:${#val}-2}" ;; \'*\') val="${val:1:${#val}-2}" ;; esac
+        genv "$key" "$val"
+        n=$((n + 1))
+    done <"$f"
+    [ "$n" -gt 0 ] && SECRETS_LOADED="$n"
+    return 0
+}
+
+# Guest paths that host-side binds must show through (so the guest doesn't
+# put a tmpfs over them).
+GUEST_BINDS=()
+
+add_bind_list() {
+    local mode="$1" p real r
+    shift
+    for p in "$@"; do
+        [ -n "$p" ] || continue
+        p="${p/#\~/$HOME}"
+        [ -e "$p" ] || continue
+        real="$(readlink -f -- "$p")"
+        if [ "$mode" = rw ]; then
+            r="$(mount_refusal "$real")"
+            if [ -n "$r" ] && [ "$OPT_FORCE" != 1 ]; then
+                warn "not mounting $p read-write: it is $r (use --force)"
+                continue
+            fi
+            g_rw "$real" "$p"
+        else
+            g_ro "$real" "$p"
+        fi
+        GUEST_BINDS+=("$p")
+    done
+}
+
+# Sets WS (mount root, may be empty), WS_CWD (start dir) and WS_LOGICAL.
+resolve_workspace() {
+    local cwd_phys top="" r
+    cwd_phys="$(pwd -P)"
+    WS="" WS_CWD="$HOME" WS_LOGICAL=""
+    [ "$OPT_NO_WORKSPACE" = 1 ] && return 0
+
+    if [ -n "$OPT_WORKSPACE" ]; then
+        WS="$(readlink -f -- "$OPT_WORKSPACE")" || die "no such workspace: $OPT_WORKSPACE"
+        [ -d "$WS" ] || die "workspace is not a directory: $WS"
+        case "$cwd_phys/" in "$WS"/*) WS_CWD="$cwd_phys" ;; *) WS_CWD="$WS" ;; esac
+    else
+        if [ "$UMBRA_GIT_ROOT" = 1 ] && command -v git >/dev/null 2>&1; then
+            top="$(git -C "$cwd_phys" rev-parse --show-toplevel 2>/dev/null || true)"
+        fi
+        if [ -n "$top" ] && [ -z "$(mount_refusal "$top")" ]; then WS="$top"; else WS="$cwd_phys"; fi
+        WS_CWD="$cwd_phys"
+    fi
+
+    r="$(mount_refusal "$WS")"
+    if [ -n "$r" ]; then
+        if [ "$OPT_FORCE" = 1 ]; then
+            warn "mounting $WS read-write although it is $r (--force)"
+        else
+            info "not mounting $WS ($r); starting in the sandbox home. Use --force or cd into a project."
+            WS="" WS_CWD="$HOME"
+            return 0
+        fi
+    fi
+    if [ "$PWD" != "$cwd_phys" ] && [ "$WS_CWD" = "$cwd_phys" ] && [ -z "$(mount_refusal "$PWD")" ]; then
+        WS_LOGICAL="$PWD"
+    fi
+}
+
+# Git dirs outside the workspace (worktrees, --separate-git-dir) get mounted;
+# with protection on, everything host git would *execute* is read-only.
+add_git_mounts() {
+    local gitdir common d r
+    command -v git >/dev/null 2>&1 || return 0
+    gitdir="$(git -C "$WS_CWD" rev-parse --absolute-git-dir 2>/dev/null)" || return 0
+    common="$(git -C "$WS_CWD" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || common="$gitdir"
+    for d in "$common" "$gitdir"; do
+        case "$d/" in "$WS"/*) continue ;; esac
+        r="$(mount_refusal "$d")"
+        if [ -n "$r" ]; then
+            warn "git dir $d is $r; not mounting it (git will not work inside)"
+            return 0
+        fi
+        g_rw "$d" "$d"
+        GUEST_BINDS+=("$d")
+    done
+    [ "$GIT_PROTECT" = 1 ] || return 0
+    mkdir -p -- "$common/hooks"
+    g_ro "$common/hooks" "$common/hooks"
+    [ -f "$common/config" ] && g_ro "$common/config" "$common/config"
+    [ -f "$gitdir/config.worktree" ] && g_ro "$gitdir/config.worktree" "$gitdir/config.worktree"
+    if [ -d "$common/modules" ]; then
+        while IFS= read -r -d '' d; do
+            g_ro "$d" "$d"
+        done < <(find "$common/modules" -maxdepth 8 \( -name config -type f -o -name hooks -type d \) -print0)
+    fi
+    return 0
+}
+
+project_key() {
+    local p="$1" h
+    h="$(printf '%s' "$p" | sha256sum | cut -c1-10)"
+    printf '%s-%s' "$(basename -- "$p" | tr -c 'A-Za-z0-9._-' '_')" "$h"
+}
+
+take_snapshot() {
+    [ -n "$WS" ] || return 0
+    [ "${OPT_SNAPSHOT:-$UMBRA_SNAPSHOT}" = 1 ] || return 0
+    local store out
+    store="$UMBRA_STATE/snapshots/$(project_key "$WS")"
+    out="$(python3 -I "$UMBRA_ROOT/lib/snapshot.py" take "$WS" "$store" --keep "$UMBRA_SNAPSHOT_KEEP" 2>&1 || true)"
+    case "$out" in
+    /*) SNAPSHOT="$out" ;;
+    *) warn "project snapshot ${out:-failed} -- 'umbra undo' won't cover this session" ;;
+    esac
+}
+
+session_report() {
+    [ -n "$SNAPSHOT" ] && [ -d "$SNAPSHOT" ] || return 0
+    local line
+    while IFS= read -r line; do
+        case "$line" in
+        RISK\ *)
+            printf '\033[33mumbra: ⚠ the agent changed files your host may execute: %s\033[0m\n' "${line#RISK }" >&2
+            printf '\033[33mumbra:   review them (umbra diff) before running builds/tests/hooks outside umbra\033[0m\n' >&2
+            ;;
+        changed\ *)
+            printf '\033[2mumbra: session %s in %s  ·  umbra diff  ·  umbra undo\033[0m\n' "$line" "${WS/#$HOME/\~}" >&2
+            ;;
+        esac
+    done < <(python3 -I "$UMBRA_ROOT/lib/snapshot.py" report "$WS" "$SNAPSHOT" 2>/dev/null || true)
+}
+
+acquire_tool_lock() {
+    [ "$(setting EXCLUSIVE "$TOOL")" = 1 ] || return 0
+    [ "$OPT_EPHEMERAL" = 1 ] && return 0
+    mkdir -p -- "$UMBRA_STATE/locks"
+    # Fixed fd 8: helpers are spawned with 8>&- so only this process and the
+    # VM itself ever hold the lock.
+    exec 8>"$UMBRA_STATE/locks/$TOOL.lock"
+    LOCK_FD=8
+    if ! flock -n 8; then
+        die "$TOOL is already running in another umbra session. Its SQLite database can't be shared
+       between two VMs without corrupting it. Finish that session, or start a throwaway
+       parallel one whose changes to $TOOL's own state are discarded:  umbra run --ephemeral $TOOL"
+    fi
+}
+
+# --------------------------------------------------------- the sandbox -----
+# build_sandbox TOOL -- prepares BW (bwrap argv), PRE (network wrapper),
+# NFT/BPF (files for lib/enter), VM_ARGS, and the guest's env + vm.conf.
+# Callers then append the program with `vmconf ARG ...` and call launch.
+build_sandbox() {
+    TOOL="$1"
+    local host_bin home seccomp_gen kv
+    NET="${OPT_NET:-$(setting NET "$TOOL")}"
+    CLIPBOARD="${OPT_CLIPBOARD:-$(setting CLIPBOARD "$TOOL")}"
+    GH="${OPT_GH:-$(setting GH "$TOOL")}"
+    GIT_PROTECT="${OPT_GIT_PROTECT:-$(setting GIT_PROTECT "$TOOL")}"
+    local allow_lan keyring
+    allow_lan="$(setting ALLOW_LAN "$TOOL")"
+    keyring="$(setting KEYRING "$TOOL")"
+
+    [ -r /dev/kvm ] && [ -w /dev/kvm ] || die "/dev/kvm is not accessible (add yourself to the kvm group)"
+    [ -x "$BUILD/umbra-vmm" ] && [ -x "$BUILD/umbra-init" ] || die "umbra is not built; run $UMBRA_ROOT/install.sh"
+    host_bin="$("tool_host_bin_$TOOL")" || die "$TOOL is not installed on the host (set UMBRA_BIN_$TOOL in umbra.conf)"
+    GUEST_BIN="$("tool_guest_bin_$TOOL")"
+
+    acquire_tool_lock
+    make_runtime_dir "$TOOL"
+
+    home="$UMBRA_STATE/home/$TOOL"
+    mkdir -p -m 0700 -- "$home"
+    if [ "$OPT_EPHEMERAL" = 1 ]; then
+        EPHEMERAL_HOME="$UMBRA_STATE/ephemeral/$TOOL-$$"
+        mkdir -p -- "$UMBRA_STATE/ephemeral"
+        cp -a --reflink=auto -- "$home" "$EPHEMERAL_HOME"
+        home="$EPHEMERAL_HOME"
+        info "ephemeral session: changes to $TOOL's own state are discarded at exit"
+    fi
+
+    resolve_workspace
+    take_snapshot
+
+    # ---- the jail around the VMM (what the host kernel exposes to it)
+    BW=(bwrap
+        --unshare-user --unshare-ipc --unshare-pid --unshare-uts --unshare-cgroup-try
+        --uid "$MY_UID" --gid "$MY_GID"
+        --die-with-parent
+        --cap-drop ALL
+        --clearenv
+        --setenv PATH /usr/bin
+        --ro-bind /usr /usr
+    )
+    add_layout ""
+    BW+=(--ro-bind /etc /etc
+        --dev /dev --dev-bind /dev/kvm /dev/kvm
+        --proc /proc
+        --tmpfs /tmp
+        --ro-bind "$BUILD/umbra-vmm" /vmm/umbra-vmm
+    )
+
+    # ---- the guest's root tree: everything under $G, nothing else
+    BW+=(--dir "$G" --dir "$G/dev" --dir "$G/proc" --dir "$G/sys"
+        --ro-bind /usr "$G/usr")
+    add_layout "$G"
+    BW+=(--ro-bind /etc "$G/etc"
+        --ro-bind-try /opt "$G/opt"
+        --tmpfs "$G/tmp"
+        --dir "$G/var" --tmpfs "$G/var/tmp" --symlink ../run "$G/var/run"
+        --tmpfs "$G/run" --dir "$G/run/user"
+        --ro-bind "$UMBRA_ROOT/guest" "$G/run/umbra/guest"
+        --ro-bind "$BUILD/umbra-init" "$G/run/umbra/bin/umbra-init"
+        --ro-bind "$RT/env" "$G/run/umbra/env"
+        --ro-bind "$RT/vm.conf" "$G/run/umbra/vm.conf"
+        --bind "$home" "$G$HOME"
+        --ro-bind "$host_bin" "$G$GUEST_BIN"
+    )
+
+    # ---- network
+    PRE=()
+    NFT="-"
+    # pasta is the one link in the chain not tied to our lifetime; make sure
+    # it (and with it the jail and the VM, via --die-with-parent) dies even
+    # if this process is SIGKILLed.
+    PDEATH=()
+    if setpriv --help 2>&1 | grep -q -- --pdeathsig; then PDEATH=(setpriv --pdeathsig KILL --); fi
+    # Dev servers in the sandbox (impeccable live, vite, streamlit) bind
+    # 127.0.0.1. Newer pasta delivers host-loopback forwards to the
+    # namespace's external address unless told otherwise, which resets every
+    # connection to a loopback-only listener.
+    LO2LO=()
+    if pasta --help 2>&1 | grep -q -- --host-lo-to-ns-lo; then LO2LO=(--host-lo-to-ns-lo); fi
+    case "$NET" in
+    ask | strict)
+        command -v pasta >/dev/null 2>&1 || die "net=$NET needs pasta (passt)"
+        command -v nft >/dev/null 2>&1 || die "net=$NET needs nft (nftables)"
+        start_egress_proxy "$NET"
+        printf 'nameserver 127.0.0.1\noptions timeout:1 attempts:1\n' >"$RT/resolv.conf"
+        write_nft_rules proxy
+        NFT="$RT/nft.rules"
+        PRE=("${PDEATH[@]}" pasta --config-net --quiet --no-map-gw "${LO2LO[@]}" -D none
+            -t "127.0.0.1/auto,1024-60999,~$PROXY_PORT" -u none -T "$PROXY_PORT" -U none --)
+        ;;
+    open)
+        command -v pasta >/dev/null 2>&1 || die "net=open needs pasta (passt)"
+        printf 'nameserver 169.254.1.1\noptions edns0 trust-ad\n' >"$RT/resolv.conf"
+        if [ "$allow_lan" != 1 ]; then
+            command -v nft >/dev/null 2>&1 || die "net=open needs nft unless UMBRA_ALLOW_LAN=1"
+            write_nft_rules open
+            NFT="$RT/nft.rules"
+        fi
+        PRE=("${PDEATH[@]}" pasta --config-net --quiet --no-map-gw "${LO2LO[@]}" --dns-forward 169.254.1.1
+            -t "127.0.0.1/auto,1024-60999" -u none -T none -U none --)
+        ;;
+    host)
+        if [ "$(setting HOSTNET_OK "$TOOL")" = 0 ] && [ "$OPT_FORCE" != 1 ]; then
+            die "--net=host is refused for $TOOL: it could reach an unsandboxed $TOOL service on the host's loopback (use --force to override)"
+        fi
+        ;;
+    none)
+        BW+=(--unshare-net)
+        printf 'nameserver 127.0.0.1\n' >"$RT/resolv.conf"
+        ;;
+    *) die "unknown network mode: $NET (ask|strict|open|host|none)" ;;
+    esac
+    if [ -f "$RT/resolv.conf" ]; then g_ro "$RT/resolv.conf" /etc/resolv.conf; fi
+
+    # ---- seccomp on the VMM process (the guest has its own kernel)
+    BPF="-"
+    if [ "$UMBRA_SECCOMP" = 1 ]; then
+        seccomp_gen="$BUILD/umbra-seccomp"
+        [ -x "$seccomp_gen" ] || die "seccomp filter generator not built; run $UMBRA_ROOT/install.sh"
+        "$seccomp_gen" >"$RT/seccomp.bpf"
+        BPF="$RT/seccomp.bpf"
+        BW+=(--seccomp 9)
+    fi
+
+    # ---- identity, editor, extra mounts
+    write_gitconfig
+    if [ -f "$HOME/.ssh/known_hosts" ]; then g_ro "$HOME/.ssh/known_hosts" "$HOME/.ssh/known_hosts"; fi
+    if [ "$GH" = 1 ]; then
+        local token=""
+        command -v gh >/dev/null 2>&1 && token="$(gh auth token 2>/dev/null || true)"
+        if [ -n "$token" ]; then genv GH_TOKEN "$token"; else warn "--gh: 'gh auth token' returned nothing; skipping"; fi
+    fi
+    local -a tool_ro=() tool_rw=()
+    mapfile -d '' -t tool_ro < <(tool_array RO_BINDS "$TOOL")
+    mapfile -d '' -t tool_rw < <(tool_array RW_BINDS "$TOOL")
+    add_bind_list ro "${UMBRA_RO_BINDS[@]}" "${tool_ro[@]}" "${OPT_RO[@]}"
+
+    # ---- workspace
+    if [ -n "$WS" ]; then
+        g_rw "$WS" "$WS"
+        GUEST_BINDS+=("$WS")
+        if [ -n "$WS_LOGICAL" ]; then
+            g_rw "$WS_CWD" "$WS_LOGICAL"
+            GUEST_BINDS+=("$WS_LOGICAL")
+        fi
+        add_git_mounts
+    fi
+    add_bind_list rw "${UMBRA_RW_BINDS[@]}" "${tool_rw[@]}" "${OPT_RW[@]}"
+
+    # ---- host integration (clipboard, browser)
+    CLIP_PATH=""
+    case "$CLIPBOARD" in bridge | off) ;; *) die "unknown clipboard mode: $CLIPBOARD (bridge|off)" ;; esac
+    start_io_bridge
+
+    # ---- guest environment (exactly this; nothing inherited)
+    genv HOME "$HOME"
+    genv USER "${USER:-$(id -un)}"
+    genv LOGNAME "${LOGNAME:-$(id -un)}"
+    genv SHELL /bin/bash
+    genv PATH "${CLIP_PATH}/run/umbra/guest/bin:$HOME/.local/bin:$HOME/.opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/bin"
+    genv TMPDIR /tmp
+    genv XDG_RUNTIME_DIR "/run/user/$MY_UID"
+    genv UMBRA_SANDBOX 1
+    genv UMBRA_VM 1
+    genv UMBRA_TOOL "$TOOL"
+    genv UMBRA_NET "$NET"
+    genv UMBRA_KEYRING "$keyring"
+    genv UMBRA_ENV_LOADED 1
+    add_env_passthrough
+    SECRETS_LOADED=0
+    load_tool_secrets
+    while IFS= read -r kv; do
+        [ -n "$kv" ] && genv "${kv%%=*}" "${kv#*=}"
+    done < <("tool_env_$TOOL")
+
+    # ---- VM config for umbra-init
+    vmconf UID "$MY_UID"
+    vmconf GID "$MY_GID"
+    vmconf HOME "$HOME"
+    vmconf WORKDIR "${WS_LOGICAL:-$WS_CWD}"
+    vmconf HOSTNAME "umbra-$TOOL"
+    vmconf ENVFILE /run/umbra/env
+    vmconf USERRUN "/run/user/$MY_UID"
+    vmconf TMPFS /dev/shm
+    local t b covered
+    for t in /tmp /var/tmp; do
+        covered=0
+        for b in "${GUEST_BINDS[@]}"; do
+            case "$b/" in "$t"/*) covered=1 ;; esac
+        done
+        [ "$covered" = 1 ] || vmconf TMPFS "$t"
+    done
+
+    VM_ARGS=(/vmm/umbra-vmm --root "$G" --init /run/umbra/bin/umbra-init --conf /run/umbra/vm.conf
+        --cpus "$(setting VM_CPUS "$TOOL")" --ram "$(setting VM_RAM "$TOOL")")
+    if [ -n "${UMBRA_VMM_LOG:-}" ]; then VM_ARGS+=(--log "$UMBRA_VMM_LOG"); fi
+    return 0
+}
+
+launch() {
+    local status=0
+    if [ "$OPT_VERBOSE" = 1 ]; then
+        printf 'umbra: net=%s clipboard=%s workspace=%s snapshot=%s\n' "$NET" "$CLIPBOARD" "${WS:-<none>}" "${SNAPSHOT:-<none>}" >&2
+        printf 'umbra:' >&2
+        printf ' %q' "${PRE[@]}" "$UMBRA_ROOT/lib/enter" "$NFT" "$BPF" -- "${BW[@]}" -- "${VM_ARGS[@]}" >&2
+        printf '\n' >&2
+    fi
+    if [ -t 0 ]; then STTY_SAVED="$(stty -g 2>/dev/null || true)"; fi
+    # The VM runs as a waited-on child, not a plain foreground command: bash
+    # defers traps until a foreground command finishes, so a hung-up
+    # terminal or a SIGTERM would otherwise leave the VM running. `wait`
+    # returns as soon as a trapped signal arrives; cleanup then stops it.
+    # (<&0 keeps the terminal as stdin; job control is off in scripts, so the
+    # child stays in the terminal's foreground process group.)
+    "${PRE[@]}" "$UMBRA_ROOT/lib/enter" "$NFT" "$BPF" -- "${BW[@]}" -- "${VM_ARGS[@]}" <&0 &
+    CHILD=$!
+    wait "$CHILD" || status=$?
+    CHILD=""
+    reset_stdio_blocking
+    if [ -n "$STTY_SAVED" ]; then stty "$STTY_SAVED" 2>/dev/null || true; fi
+    session_report
+    return "$status"
+}
+
+# ------------------------------------------------------------ commands -----
+need_tool() { is_tool "$1" || die "unknown tool: $1 (one of: ${UMBRA_TOOLS[*]})"; }
+
+cmd_run() {
+    parse_run_opts "$@"
+    set -- "${REST[@]}"
+    [ $# -ge 1 ] || die "usage: umbra run [options] <tool> [args...]"
+    local tool="$1" a
+    shift
+    need_tool "$tool"
+    build_sandbox "$tool"
+    vmconf ARG /run/umbra/guest/init
+    vmconf ARG "$GUEST_BIN"
+    for a in "$@"; do vmconf ARG "$a"; done
+    launch
+}
+
+cmd_exec() {
+    parse_run_opts "$@"
+    set -- "${REST[@]}"
+    [ $# -ge 2 ] || die "usage: umbra exec [options] <tool> <command> [args...]"
+    local tool="$1" a
+    shift
+    need_tool "$tool"
+    build_sandbox "$tool"
+    vmconf ARG /run/umbra/guest/init
+    for a in "$@"; do vmconf ARG "$a"; done
+    launch
+}
+
+cmd_shell() {
+    parse_run_opts "$@"
+    set -- "${REST[@]}"
+    [ $# -ge 1 ] || die "usage: umbra shell [options] <tool>"
+    need_tool "$1"
+    build_sandbox "$1"
+    genv PROMPT_COMMAND "PS1='\[\e[35m\][umbra:$1 vm]\[\e[0m\] \w \$ '"
+    vmconf ARG /run/umbra/guest/init
+    vmconf ARG /bin/bash
+    vmconf ARG -i
+    launch
+}
+
+cmd_login() {
+    parse_run_opts "$@"
+    set -- "${REST[@]}"
+    [ $# -ge 1 ] || die "usage: umbra login <tool>"
+    local tool="$1" a
+    shift
+    need_tool "$tool"
+    local -a argv
+    read -r -a argv < <("tool_login_$tool")
+    [ -n "$OPT_NET" ] || OPT_NET="$("tool_login_net_$tool")"
+    OPT_NO_WORKSPACE=1
+    OPT_SNAPSHOT=0
+    info "signing in $tool inside its VM (network: $OPT_NET)"
+    build_sandbox "$tool"
+    vmconf ARG /run/umbra/guest/init
+    vmconf ARG "$GUEST_BIN"
+    for a in "${argv[@]:1}" "$@"; do vmconf ARG "$a"; done
+    launch
+}
+
+cmd_import() {
+    local force=0
+    if [ "${1:-}" = --force ]; then force=1; shift; fi
+    [ $# -ge 1 ] || die "usage: umbra import [--force] <tool> [v1|host]"
+    local tool="$1" src="${2:-}"
+    need_tool "$tool"
+    command -v rsync >/dev/null 2>&1 || die "import needs rsync"
+    if [ -z "$src" ]; then
+        case "$tool" in
+        opencode) src=host ;;
+        *) if [ -d "$UMBRA_V1_DIR/auth/$tool" ]; then src=v1; else src=host; fi ;;
+        esac
+    fi
+    case "$src" in v1 | host) ;; *) die "import source must be v1 or host" ;; esac
+    local home="$UMBRA_STATE/home/$tool"
+    mkdir -p -m 0700 -- "$home"
+    if [ "$force" != 1 ]; then
+        local marker
+        for marker in $("tool_state_$tool"); do
+            [ -e "$home/$marker" ] && die "$home/$marker already exists; use 'umbra import --force $tool $src' to merge over it"
+        done
+    fi
+    info "importing $tool state from $src into $home"
+    "tool_import_$tool" "$src" "$home"
+    info "done"
+}
+
+cmd_update() {
+    local tools=("$@") t bin argv
+    [ ${#tools[@]} -gt 0 ] || tools=("${UMBRA_TOOLS[@]}")
+    for t in "${tools[@]}"; do
+        need_tool "$t"
+        if ! bin="$("tool_host_bin_$t")"; then
+            warn "$t: not installed, skipping"
+            continue
+        fi
+        case "$t" in claude) bin="$HOME/.local/bin/claude" ;; esac
+        [ -x "$bin" ] || bin="$("tool_host_bin_$t")"
+        read -r -a argv < <("tool_update_$t")
+        info "updating $t on the host (vendor updater, unsandboxed): $bin ${argv[*]}"
+        "$bin" "${argv[@]}" || warn "$t update failed"
+    done
+}
+
+# ---- egress lists
+normalize_domain() {
+    printf '%s' "$1" | tr 'A-Z' 'a-z' | sed 's#^[a-z]*://##; s#/.*##; s#^\*\.##; s#^\.##'
+}
+
+cmd_allow() {
+    [ $# -ge 1 ] || die "usage: umbra allow <domain|domain:port>..."
+    local d f="$UMBRA_ROOT/egress/allow"
+    mkdir -p -- "$(dirname -- "$f")"
+    for d in "$@"; do
+        d="$(normalize_domain "$d")"
+        [ -n "$d" ] || continue
+        if ! sed 's/#.*//; s/[[:space:]]//g' "$f" 2>/dev/null | grep -qxF "$d"; then
+            printf '%s    # added %s\n' "$d" "$(date -Is)" >>"$f"
+        fi
+        info "allowed $d (takes effect immediately, including running sessions)"
+    done
+}
+
+cmd_deny() {
+    [ $# -ge 1 ] || die "usage: umbra deny <domain>..."
+    local d f="$UMBRA_ROOT/egress/deny" a="$UMBRA_ROOT/egress/allow" esc
+    mkdir -p -- "$(dirname -- "$f")"
+    for d in "$@"; do
+        d="$(normalize_domain "$d")"
+        [ -n "$d" ] || continue
+        printf '%s    # added %s\n' "$d" "$(date -Is)" >>"$f"
+        esc="$(printf '%s' "$d" | sed 's/[.[\*^$/]/\\&/g')"
+        [ -f "$a" ] && sed -i "/^${esc}\([[:space:]]\|\$\)/d" "$a"
+        info "denied $d"
+    done
+}
+
+cmd_egress() {
+    local n="${1:-40}"
+    [ -f "$EGRESS_LOG" ] || { echo "no egress decisions logged yet ($EGRESS_LOG)"; return 0; }
+    tail -n "$n" "$EGRESS_LOG"
+}
+
+# ---- snapshots
+resolve_project() {
+    local p="${1:-$PWD}" top
+    p="$(readlink -f -- "$p")"
+    top="$(git -C "$p" rev-parse --show-toplevel 2>/dev/null || true)"
+    if [ -n "$top" ] && [ -d "$UMBRA_STATE/snapshots/$(project_key "$top")" ]; then p="$top"; fi
+    printf '%s' "$p"
+}
+
+latest_snapshot() {
+    python3 -I "$UMBRA_ROOT/lib/snapshot.py" list "$UMBRA_STATE/snapshots/$(project_key "$1")" | tail -n1
+}
+
+cmd_snapshots() {
+    local p
+    p="$(resolve_project "${1:-}")"
+    echo "snapshots of $p (newest last):"
+    python3 -I "$UMBRA_ROOT/lib/snapshot.py" list "$UMBRA_STATE/snapshots/$(project_key "$p")" | sed 's/^/  /'
+}
+
+cmd_diff() {
+    local p snap
+    p="$(resolve_project "${1:-}")"
+    snap="${2:-$(latest_snapshot "$p")}"
+    [ -n "$snap" ] || die "no snapshots for $p"
+    echo "changes in $p since $(basename -- "$snap")"
+    echo "(A added  M modified  D deleted  X made executable  ! host-executed file)"
+    python3 -I "$UMBRA_ROOT/lib/snapshot.py" diff "$p" "$snap"
+}
+
+cmd_undo() {
+    local yes=0
+    if [ "${1:-}" = -y ] || [ "${1:-}" = --yes ]; then yes=1; shift; fi
+    local p snap ans d
+    p="$(resolve_project "${1:-}")"
+    snap="${2:-$(latest_snapshot "$p")}"
+    [ -n "$snap" ] && [ -d "$snap" ] || die "no snapshots for $p"
+    command -v rsync >/dev/null 2>&1 || die "undo needs rsync"
+    # Directories snapshots skip are left alone (not deleted, not restored).
+    local -a ex=()
+    for d in node_modules __pycache__ .mypy_cache .pytest_cache .ruff_cache .tox .nox .next .nuxt \
+        .svelte-kit .turbo .parcel-cache .gradle .zig-cache zig-out .direnv .terraform venv .venv env target; do
+        ex+=(--exclude="$d/")
+    done
+    echo "restore $p to snapshot $(basename -- "$snap")? This will:"
+    rsync -ani --delete "${ex[@]}" -- "$snap/" "$p/" | grep -v '^\.' | sed 's/^/  /' | head -n 40 || true
+    if [ "$yes" != 1 ]; then
+        printf 'proceed? [y/N] '
+        read -r ans
+        case "$ans" in y | Y | yes) ;; *) echo "aborted"; return 1 ;; esac
+    fi
+    # Snapshot the current state first, so the undo is itself undoable.
+    WS="$p" SNAPSHOT="" OPT_SNAPSHOT=1
+    take_snapshot
+    rsync -a --delete "${ex[@]}" -- "$snap/" "$p/"
+    info "restored $p to $(basename -- "$snap"); the state before the undo is snapshot $(basename -- "${SNAPSHOT:-?}")"
+}
+
+cmd_doctor() {
+    local ok=1 t b c
+    check() { if eval "$2" >/dev/null 2>&1; then printf '  \033[32m✓\033[0m %s\n' "$1"; else printf '  \033[31m✗\033[0m %s%s\n' "$1" "${3:+ -- $3}"; [ "${4:-req}" = opt ] || ok=0; fi; }
+    echo "umbra $UMBRA_VERSION ($UMBRA_ROOT)"
+    echo "isolation:"
+    check "KVM (/dev/kvm read-write)" "test -r /dev/kvm -a -w /dev/kvm" "join the kvm group"
+    check "libkrun + libkrunfw" "ls /usr/lib/libkrun.so.1 /usr/lib/libkrunfw.so.* || ls /usr/lib64/libkrun.so.1 /usr/lib64/libkrunfw.so.*" "install libkrun libkrunfw"
+    check "umbra-vmm / umbra-init built" "test -x '$BUILD/umbra-vmm' -a -x '$BUILD/umbra-init'" "run install.sh"
+    check "bubblewrap" "command -v bwrap" "install bubblewrap"
+    check "unprivileged user namespaces" "bwrap --unshare-user --ro-bind / / true"
+    check "seccomp filter built" "test -x '$BUILD/umbra-seccomp'" "run install.sh"
+    echo "network:"
+    check "pasta" "command -v pasta" "install passt"
+    check "nftables" "command -v nft" "install nftables"
+    check "python3 (egress proxy, snapshots)" "command -v python3"
+    check "notification actions (ask prompts)" "busctl --user call org.freedesktop.Notifications /org/freedesktop/Notifications org.freedesktop.Notifications GetCapabilities | grep -q actions" "unknown domains will be denied; use 'umbra allow'" opt
+    echo "integration:"
+    check "wl-paste/wl-copy (clipboard bridge)" "command -v wl-paste && command -v wl-copy && test -n \"\${WAYLAND_DISPLAY:-}\"" "" opt
+    check "reflink snapshots (btrfs/xfs)" "findmnt -no FSTYPE -T '$UMBRA_STATE' | grep -qE 'btrfs|xfs'" "small projects are copied instead" opt
+    check "TUI built" "test -x '$BUILD/umbra-tui'" "run install.sh" opt
+    echo "tools:"
+    for t in "${UMBRA_TOOLS[@]}"; do
+        if b="$("tool_host_bin_$t")"; then
+            c="$UMBRA_STATE/home/$t"
+            printf '  \033[32m✓\033[0m %-9s %s\n' "$t" "$b"
+            printf '      home %s (%s)\n' "${c/#$HOME/\~}" "$(du -sh "$c" 2>/dev/null | cut -f1 || echo empty)"
+            printf '      net=%s clipboard=%s exclusive=%s vm=%s vCPU / %s MiB\n' \
+                "$(setting NET "$t")" "$(setting CLIPBOARD "$t")" "$(setting EXCLUSIVE "$t")" \
+                "$(setting VM_CPUS "$t" | sed 's/^0$/all/')" "$(setting VM_RAM "$t")"
+        else
+            printf '  \033[33m-\033[0m %-9s not installed\n' "$t"
+        fi
+    done
+    [ "$ok" = 1 ] || { echo "some requirements are missing"; return 1; }
+}
+
+# The in-VM probe shared by `umbra selftest` and `umbra audit`.
+guest_probe() {
+    cat <<'PROBE'
+
+        pass() { printf "  \033[32mPASS\033[0m %s\n" "$1"; }
+        fail() { printf "  \033[31mFAIL\033[0m %s\n" "$1"; bad=1; }
+        bad=0
+        # Refused = proxy answers 403, or the connection fails (000).
+        refused() { c=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$@"); [ "$c" = 403 ] || [ "$c" = 000 ]; }
+        # umbra audit passes its values through the scratch project instead of env.
+        [ -f ./.umbra-audit.conf ] && . ./.umbra-audit.conf
+        [ "$(uname -r)" != "$HOST_KERNEL" ] && pass "own guest kernel ($(uname -r); host runs $HOST_KERNEL)" || fail "same kernel as host"
+        [ "$(id -u)" = "$HOST_UID" ] && pass "runs as your uid ($(id -u))" || fail "uid is $(id -u)"
+        grep -q "^NoNewPrivs:[[:space:]]*1" /proc/self/status && pass "no_new_privs" || fail "no_new_privs not set"
+        grep -q "^CapEff:[[:space:]]*0000000000000000" /proc/self/status && pass "no capabilities" || fail "has capabilities"
+        grep -q "^CapBnd:[[:space:]]*0000000000000000" /proc/self/status && pass "empty capability bounding set" || fail "bounding set not empty"
+        leak=0
+        for p in "$HOME/.ssh/id_ed25519" "$HOME/.ssh/id_rsa" "$HOME/.gnupg" "$HOME/.mozilla" "$HOME/.config/fish" \
+                 "$HOME/.config/gh" "/run/user/$HOST_UID/bus" "/run/user/$HOST_UID/$HOST_WAYLAND" /vmm /dev/kvm; do
+            [ -e "$p" ] && { fail "visible: $p"; leak=1; }
+        done
+        [ "$leak" = 0 ] && pass "host keys, browser, session bus, compositor, KVM, VMM not visible"
+        [ -z "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" ] && pass "host-exported secrets not in env" || fail "GITHUB_PERSONAL_ACCESS_TOKEN leaked"
+        sudo -n true 2>/dev/null && fail "sudo works" || pass "sudo/setuid inert"
+        if [ "$UMBRA_NET" = strict ] || [ "$UMBRA_NET" = ask ]; then
+            curl -s -o /dev/null --noproxy "*" --max-time 4 https://1.1.1.1/ && fail "direct egress possible" || pass "direct egress blocked (proxy is the only way out)"
+            getent hosts example.com >/dev/null 2>&1 && fail "DNS works (tunneling channel)" || pass "DNS blocked (no DNS tunneling)"
+            curl -s -o /dev/null --max-time 15 https://api.anthropic.com/ && pass "allowlisted domain via proxy (api.anthropic.com)" || fail "allowlisted domain unreachable"
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 6 https://example.org/)
+            [ "$code" = 000 ] && pass "unlisted domain refused (strict)" || fail "unlisted domain got $code"
+            refused "http://$HOST_GW/" && pass "LAN ($HOST_GW) refused" || fail "LAN $HOST_GW reachable"
+            refused --noproxy "" http://127.0.0.1:631/ && pass "host loopback refused" || fail "host loopback reachable"
+            refused http://localhost.nip.io:631/ && pass "DNS-rebinding name to 127.0.0.1 refused" || fail "rebinding name reachable"
+            refused http://169.254.169.254/latest/meta-data/ && pass "cloud metadata refused" || fail "metadata reachable"
+        fi
+        git config --global user.email >/dev/null && pass "git identity: $(git config --global user.name) <$(git config --global user.email)>" || echo "  info no git identity on host"
+        if [ -f ./.umbra-audit.conf ]; then
+            cn="UMBRA-CAN""ARY-"   # assembled at runtime: the literal is nowhere in the VM config
+            leak=0
+            for p in $AUDIT_PATHS; do [ -e "$p" ] && { fail "canary visible inside the VM: $p"; leak=1; }; done
+            [ "$leak" = 0 ] && pass "host canary files (home, ~/.ssh key, next to the project) not visible"
+            hits=$(grep -rIlsF "$cn" /run /tmp /var /mnt /media /srv /root 2>/dev/null | head -3)
+            hits="$hits$(find "$HOME" -maxdepth 2 -type f -size -1M -print0 2>/dev/null | xargs -0 -r grep -lsF "$cn" 2>/dev/null | head -3)"
+            [ -z "$hits" ] && pass "canary secret content found nowhere in the VM" || fail "canary content found: $hits"
+            env | grep -qF "$cn" && fail "canary env var leaked into the VM" || pass "secret exported in your host shell is absent from the VM"
+            if [ -n "${HOST_LAN_IP:-}" ] && [ -n "${HOST_OPEN_PORT:-}" ]; then
+                if refused "http://$HOST_LAN_IP:$HOST_OPEN_PORT/" && refused --noproxy "*" "http://$HOST_LAN_IP:$HOST_OPEN_PORT/" \
+                   && refused --noproxy "*" "http://127.0.0.1:$HOST_OPEN_PORT/"; then
+                    pass "a real service on this laptop (port $HOST_OPEN_PORT, all interfaces) is unreachable, via proxy or directly"
+                else
+                    fail "host service on port $HOST_OPEN_PORT reachable from the VM"
+                fi
+            fi
+            : > ./.umbra-audit.ready
+            for i in $(seq 1 240); do [ -e ./.umbra-audit.done ] && break; sleep 0.25; done
+        fi
+        exit $bad
+PROBE
+}
+
+# Verifies the isolation from inside a live VM (strict egress: no prompts).
+cmd_selftest() {
+    local tool="${1:-claude}"
+    need_tool "$tool"
+    shift || true
+    parse_run_opts "$@"
+    [ -n "$OPT_NET" ] || OPT_NET=strict
+    local probe
+    probe="$(guest_probe)"
+    local gw a
+    gw="$(ip route show default 2>/dev/null | awk '{print $3; exit}')"
+    OPT_NO_WORKSPACE=1
+    OPT_SNAPSHOT=0
+    build_sandbox "$tool"
+    genv HOST_UID "$MY_UID"
+    genv HOST_KERNEL "$(uname -r)"
+    genv HOST_GW "${gw:-192.168.1.1}"
+    genv HOST_WAYLAND "${WAYLAND_DISPLAY:-wayland-0}"
+    for a in /run/umbra/guest/init /bin/bash -c "$probe"; do vmconf ARG "$a"; done
+    echo "umbra selftest ($tool, microVM, net=$NET)"
+    launch
+}
+
+# umbra audit [tool] -- verify the isolation of a *live* VM, from both sides.
+#
+# Plants canaries on your host (a secret file in $HOME, a fake SSH private
+# key in ~/.ssh, a secret file next to the project, an exported secret env
+# var -- like the ones your shell config exports), starts a VM on a scratch
+# git project, and then checks:
+#   from outside, using the kernel's own records in /proc: the VMM's
+#     privileges, namespaces, filesystem view, /dev, environment, argv of
+#     every process, which processes hold /dev/kvm, the live firewall rules in
+#     the VM's network namespace (read via nsenter) and whether a direct
+#     connection out of that namespace is possible;
+#   from inside: the same probe as `umbra selftest`, plus a search for the
+#     canaries.
+# Every check prints what it verified; nothing here trusts umbra's own
+# configuration. Canaries and the scratch project are removed afterwards.
+cmd_audit() {
+    local tool="${1:-claude}"
+    need_tool "$tool"
+    local tok vmm ib ob log i n_pass=0 n_fail=0 p
+    # Globals (not locals): the EXIT trap runs after this function's scope is gone.
+    AUDIT_DIR="$(mktemp -d /tmp/umbra-audit.XXXXXX)"
+    AUDIT_HOME_CANARY="$HOME/.umbra-audit-canary"
+    AUDIT_SSH_CANARY="$HOME/.ssh/id_umbra_audit_canary"
+    AUDIT_PID=""
+    tok="UMBRA-CANARY-$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    local aud="$AUDIT_DIR" home_canary="$AUDIT_HOME_CANARY" ssh_canary="$AUDIT_SSH_CANARY"
+    local neighbor="$AUDIT_DIR/neighbor-secret.txt" proj="$AUDIT_DIR/project"
+    audit_cleanup() {
+        rm -f -- "${AUDIT_HOME_CANARY:-}" "${AUDIT_SSH_CANARY:-}"
+        if [ -n "${AUDIT_PID:-}" ]; then kill -TERM "$AUDIT_PID" 2>/dev/null || true; fi
+        if [ -n "${AUDIT_DIR:-}" ]; then rm -rf -- "$AUDIT_DIR"; fi
+    }
+    trap audit_cleanup EXIT
+    trap 'exit 130' INT
+    ok() { printf '  \033[32mPASS\033[0m %s\n' "$1"; n_pass=$((n_pass + 1)); }
+    bad() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; n_fail=$((n_fail + 1)); }
+
+    mkdir -p "$proj"
+    git -C "$proj" init -q && echo hi >"$proj/README" && git -C "$proj" add README \
+        && git -C "$proj" -c user.name=audit -c user.email=audit@localhost commit -qm init
+    (umask 077; printf '%s\n' "$tok" >"$home_canary"; printf '%s\n' "$tok" >"$neighbor")
+    if [ -d "$HOME/.ssh" ]; then
+        (umask 077; printf -- '-----BEGIN OPENSSH PRIVATE KEY-----\n%s\n-----END OPENSSH PRIVATE KEY-----\n' "$tok" >"$ssh_canary")
+    fi
+    export UMBRA_AUDIT_CANARY_SECRET="$tok"   # like a secret your shell exports
+    local gw lan_ip open_port
+    gw="$(ip route show default 2>/dev/null | awk '{print $3; exit}')"
+    lan_ip="$(ip -4 route get 1.1.1.1 2>/dev/null | grep -oP 'src \K[0-9.]+' || true)"
+    # A real service on this laptop listening on all interfaces (if any): the
+    # VM must not reach it, neither via the proxy nor directly.
+    open_port="$(ss -ltnH 2>/dev/null | awk '$4 ~ /^(0\.0\.0\.0|\*|\[::\]):[0-9]+$/ {sub(/.*:/, "", $4); print $4; exit}' || true)"
+    cat >"$proj/.umbra-audit.conf" <<EOF
+HOST_UID=$MY_UID
+HOST_KERNEL='$(uname -r)'
+HOST_GW='${gw:-192.168.1.1}'
+HOST_WAYLAND='${WAYLAND_DISPLAY:-wayland-0}'
+AUDIT_PATHS='$home_canary $ssh_canary $neighbor'
+HOST_LAN_IP='${lan_ip:-}'
+HOST_OPEN_PORT='${open_port:-}'
+EOF
+
+    echo "umbra audit ($tool, microVM, net=strict) -- canaries planted on the host"
+    log="$aud/guest.log"
+    "$UMBRA_ROOT/bin/umbra" exec --net=strict --no-snapshot --workspace="$proj" "$tool" \
+        bash -c "$(guest_probe)" >"$log" 2>&1 </dev/null &
+    local pid=$!
+    AUDIT_PID="$pid"
+    for i in $(seq 1 120); do [ -e "$proj/.umbra-audit.ready" ] && break; sleep 0.25; done
+    [ -e "$proj/.umbra-audit.ready" ] || { cat "$log"; die "the VM did not come up"; }
+
+    # Find this session's VMM: the newest umbra-vmm descending from $pid.
+    vmm=""
+    for p in $(pgrep -f '^/vmm/umbra-vmm'); do
+        local q="$p"
+        while [ "$q" -gt 1 ] 2>/dev/null; do
+            [ "$q" = "$pid" ] && { vmm="$p"; break; }
+            q="$(ps -o ppid= -p "$q" 2>/dev/null | tr -d ' ')"
+            [ -n "$q" ] || break
+        done
+    done
+    [ -n "$vmm" ] || die "could not find the VM process"
+    ib="$(ps -o ppid= -p "$vmm" | tr -d ' ')"
+    ob="$(ps -o ppid= -p "$ib" | tr -d ' ')"
+
+    echo "host side -- inspecting VM process $vmm from outside (kernel /proc data):"
+    local st
+    st="$(cat "/proc/$vmm/status")"
+    grep -q "^Uid:[[:space:]]*$MY_UID[[:space:]]" <<<"$st" && ok "VMM runs as your uid, not root" || bad "VMM uid: $(grep ^Uid <<<"$st")"
+    grep -q '^CapEff:[[:space:]]*0000000000000000' <<<"$st" && grep -q '^CapBnd:[[:space:]]*0000000000000000' <<<"$st" \
+        && ok "VMM has no capabilities (effective and bounding set empty)" || bad "VMM capabilities: $(grep -E '^Cap(Eff|Bnd)' <<<"$st" | tr '\n' ' ')"
+    grep -q '^NoNewPrivs:[[:space:]]*1' <<<"$st" && ok "VMM has no_new_privs (setuid binaries can't elevate it)" || bad "no_new_privs not set on VMM"
+    grep -q '^Seccomp:[[:space:]]*2' <<<"$st" && ok "VMM is under a seccomp filter" || bad "no seccomp filter on VMM"
+    local ns shared=""
+    for ns in user pid mnt net ipc uts; do
+        [ "$(readlink "/proc/$vmm/ns/$ns")" = "$(readlink "/proc/$$/ns/$ns")" ] && shared+=" $ns"
+    done
+    [ -z "$shared" ] && ok "VMM is in its own user/pid/mount/net/ipc/uts namespaces" || bad "VMM shares namespaces with your session:$shared"
+    local top
+    top="$(ls -A "/proc/$vmm/root/" | sort | tr '\n' ' ')"
+    case " $top " in *" home "* | *" root "* | *" mnt "* | *" media "*) bad "VMM can see host dirs: $top" ;;
+        *) ok "VMM filesystem is an explicit tree, no host /home: $top" ;; esac
+    local leaks
+    leaks="$(for p in "$home_canary" "$ssh_canary" "$neighbor"; do if [ -e "/proc/$vmm/root/guest$p" ] || [ -e "/proc/$vmm/root$p" ]; then echo "$p"; fi; done)"
+    [ -z "$leaks" ] && ok "canary files don't exist anywhere in the VMM's view (incl. a fake ~/.ssh private key)" || bad "canary visible to VMM: $leaks"
+    leaks="$(grep -rlsF "$tok" "/proc/$vmm/root/tmp" "/proc/$vmm/root/guest/tmp" "/proc/$vmm/root/guest/run" "/proc/$vmm/root/guest/var" 2>/dev/null | head -3 || true)"
+    leaks+="$(find "/proc/$vmm/root/guest$HOME" -maxdepth 2 -type f -size -1M -print0 2>/dev/null | xargs -0 -r grep -lsF "$tok" 2>/dev/null | head -3 || true)"
+    [ -z "$leaks" ] && ok "canary secret's content found nowhere in the VMM's view (home, /tmp, /run, /var)" || bad "canary content reachable: $leaks"
+    local devs
+    devs="$(ls "/proc/$vmm/root/dev" | sort | tr '\n' ' ')"
+    case " $devs " in *" sda"* | *" nvme"* | *" dri "* | *" input "* | *" mem "*) bad "host devices visible to VMM: $devs" ;;
+        *) ok "VMM /dev is minimal (no disks, GPU, input, /dev/mem): $devs" ;; esac
+    local envv
+    envv="$(tr '\0' ' ' <"/proc/$vmm/environ")"
+    case "$envv" in *"$tok"* | *TOKEN* | *KEY=* | *SECRET*) bad "secrets in VMM environment: $envv" ;;
+        *) ok "VMM environment holds no secrets: $envv" ;; esac
+    printf '%s\n' "$tok" >"$aud/canary.pattern"   # pattern file: keeps the canary out of grep's own argv
+    leaks="$(grep -lsFf "$aud/canary.pattern" /proc/[0-9]*/cmdline 2>/dev/null | head -3 || true)"
+    [ -z "$leaks" ] && ok "no process on the host has a secret in its command line (world-readable /proc/*/cmdline)" || bad "secret in argv: $leaks"
+    # libkrun closes /dev/kvm after creating the VM; what it keeps are the VM
+    # and vCPU handles (anon_inode:kvm-vm / kvm-vcpu:N).
+    local kvm_holders="" vcpus
+    for p in /proc/[0-9]*; do
+        if ls -l "$p/fd" 2>/dev/null | grep -qE ' (/dev/kvm|anon_inode:kvm-vm)$'; then kvm_holders+=" ${p#/proc/}"; fi
+    done
+    vcpus="$(ls -l "/proc/$vmm/fd" 2>/dev/null | grep -c 'anon_inode:kvm-vcpu' || true)"
+    if [[ " $kvm_holders " == *" $vmm "* ]]; then
+        ok "a real KVM virtual machine backs this session (VMM holds kvm-vm + $vcpus vCPUs)"
+    else
+        bad "the VMM holds no KVM VM handle"
+    fi
+    local rules
+    rules="$(nsenter -t "$ob" -U -n --preserve-credentials nft list ruleset 2>&1 || true)"
+    if grep -q 'table inet umbra' <<<"$rules" && grep -q 'reject' <<<"$rules"; then
+        ok "live firewall in the VM's network namespace (read via nsenter):"
+        sed 's/^/         /' <<<"$rules" | grep -vE '^\s*$'
+    else
+        bad "no umbra firewall in the VM's network namespace: $rules"
+    fi
+    if nsenter -t "$ob" -U -n --preserve-credentials curl -s -o /dev/null --noproxy '*' --max-time 4 https://1.1.1.1/ 2>/dev/null; then
+        bad "a direct connection out of the VM's network namespace succeeded"
+    else
+        ok "a direct connection out of the VM's network namespace is refused (only the proxy port is reachable)"
+    fi
+    local listen proxy_pid
+    proxy_pid="$(pgrep -n -f "lib/egress.py --tool $tool " || true)"
+    listen="$(ss -ltnpH 2>/dev/null | grep -F "pid=$proxy_pid," | awk '{print $4}' | sort -u | tr '\n' ' ' || true)"
+    case "$listen" in *"0.0.0.0:"* | *"[::]:"* | *"*:"*) bad "egress proxy listens beyond loopback: $listen" ;;
+        *) ok "egress proxy listens on loopback only: ${listen:-?}" ;; esac
+
+    : >"$proj/.umbra-audit.done"
+    wait "$pid" 2>/dev/null || true
+    AUDIT_PID=""
+    echo "guest side -- the same checks from inside the VM:"
+    grep -E 'PASS|FAIL|info' "$log" | sed 's/^ */  /' || true
+    n_pass=$((n_pass + $(grep -c PASS "$log" || true)))
+    n_fail=$((n_fail + $(grep -c FAIL "$log" || true)))
+    echo
+    if [ "$n_fail" = 0 ]; then
+        printf '\033[32maudit: %d checks passed, 0 failed\033[0m (canaries removed)\n' "$n_pass"
+    else
+        printf '\033[31maudit: %d passed, %d FAILED\033[0m (canaries removed)\n' "$n_pass" "$n_fail"
+        return 1
+    fi
+}
+
+# umbra status --json -- everything the TUI shows, from real state only.
+cmd_status() {
+    [ "${1:-}" = --json ] || die "usage: umbra status --json"
+    local tmp t b v
+    tmp="$(mktemp -d)"
+    # Versions in parallel (opencode --version alone takes ~100 ms).
+    for t in "${UMBRA_TOOLS[@]}"; do
+        (
+            b="$("tool_host_bin_$t" 2>/dev/null)" || exit 0
+            v="$(basename -- "$b")"
+            if ! [[ $v =~ ^[0-9]+\.[0-9]+ ]]; then
+                v="$(timeout 3 "$b" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1)"
+            fi
+            printf '%s\n%s\n' "$b" "${v:-}" >"$tmp/$t"
+        ) &
+    done
+
+    # Workspace, exactly as `umbra run` would resolve it.
+    local cwd_phys reason="" branch="" store snaps=() latest="" age=0 report=""
+    cwd_phys="$(pwd -P)"
+    UMBRA_QUIET=1 resolve_workspace 2>/dev/null
+    if [ -z "$WS" ]; then
+        reason="$(mount_refusal "$cwd_phys")"
+    else
+        branch="$(git -C "$WS" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+        store="$UMBRA_STATE/snapshots/$(project_key "$WS")"
+        mapfile -t snaps < <(python3 -I "$UMBRA_ROOT/lib/snapshot.py" list "$store" 2>/dev/null)
+        if [ ${#snaps[@]} -gt 0 ]; then
+            latest="${snaps[-1]}"
+            age=$(($(date +%s) - $(stat -c %Y -- "$latest")))
+            report="$(python3 -I "$UMBRA_ROOT/lib/snapshot.py" report "$WS" "$latest" 2>/dev/null || true)"
+        fi
+    fi
+
+    # Live sessions: runtime dirs whose owning umbra process is alive.
+    local base="${XDG_RUNTIME_DIR:-$UMBRA_STATE/run}/umbra" d pid
+    declare -A live=()
+    for d in "$base"/*/; do
+        pid="$(cat "$d/pid" 2>/dev/null || true)"
+        [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || continue
+        t="$(basename -- "$d")"
+        t="${t%%.*}"
+        live[$t]=$((${live[$t]:-0} + 1))
+    done
+
+    local today allowed=0 refused=0
+    today="$(date +%F)"
+    if [ -f "$EGRESS_LOG" ]; then
+        allowed="$(grep -c "^${today}T[^ ]* [^ ]* *ALLOW " "$EGRESS_LOG" || true)"
+        refused="$(grep -c "^${today}T[^ ]* [^ ]* *DENY " "$EGRESS_LOG" || true)"
+    fi
+    wait
+
+    local rows=""
+    for t in "${UMBRA_TOOLS[@]}"; do
+        local bin="" ver=""
+        if [ -f "$tmp/$t" ]; then { read -r bin; read -r ver; } <"$tmp/$t"; fi
+        rows+="$t"$'\t'"$bin"$'\t'"$ver"$'\t'"$(setting NET "$t")"$'\t'"$(setting EXCLUSIVE "$t")"$'\t'"${live[$t]:-0}"$'\t'"$(setting VM_CPUS "$t")"$'\t'"$(setting VM_RAM "$t")"$'\n'
+    done
+    rm -rf -- "$tmp"
+
+    ROWS="$rows" REPORT="$report" python3 -I - "$UMBRA_VERSION" "$PWD" "$cwd_phys" "${WS:-}" "${WS_LOGICAL:-}" "$reason" \
+        "$branch" "${#snaps[@]}" "$latest" "$age" "$allowed" "$refused" "$UMBRA_NET" <<'PY'
+import json, os, re, sys
+(ver, cwd, cwd_phys, ws, ws_logical, reason, branch, nsnap, latest, age, allowed, refused, net) = sys.argv[1:14]
+names = {"claude": "Claude Code", "opencode": "OpenCode", "agy": "Antigravity"}
+tools = []
+for line in os.environ["ROWS"].splitlines():
+    k, b, v, tnet, excl, live, cpus, ram = line.split("\t")
+    tools.append({"key": k, "name": names.get(k, k), "installed": bool(b), "version": v,
+                  "net": tnet, "exclusive": excl == "1", "live": int(live),
+                  "vcpus": int(cpus) if cpus.isdigit() else 0, "ram": int(ram) if ram.isdigit() else 0})
+last = None
+rep = os.environ.get("REPORT", "")
+m = re.search(r"changed (\d+) files? \(\+(\d+) ~(\d+) -(\d+)\)", rep)
+if m:
+    risky = []
+    r = re.search(r"^RISK (.*)$", rep, re.M)
+    if r:
+        risky = [x.strip() for x in re.sub(r", \+\d+ more$", "", r.group(1)).split(",") if x.strip()]
+    last = {"changed": int(m.group(1)), "added": int(m.group(2)), "modified": int(m.group(3)),
+            "deleted": int(m.group(4)), "risky": risky}
+elif latest:
+    last = {"changed": 0, "added": 0, "modified": 0, "deleted": 0, "risky": []}
+print(json.dumps({
+    "version": ver, "net": net, "cwd": cwd,
+    "workspace": {"root": ws or None, "mounted": bool(ws), "reason": reason or None,
+                  "start": ws_logical or cwd_phys if ws else None, "branch": branch or None},
+    "snapshots": {"count": int(nsnap), "latest": os.path.basename(latest) if latest else None,
+                  "ageSeconds": int(age) if latest else None},
+    "lastSession": last,
+    "egressToday": {"allowed": int(allowed or 0), "refused": int(refused or 0)},
+    "tools": tools,
+}))
+PY
+}
+
+cmd_tui() {
+    local tui="$BUILD/umbra-tui"
+    [ -x "$tui" ] || { usage; return 0; }
+    UMBRA_BIN="$UMBRA_ROOT/bin/umbra" UMBRA_VERSION="$UMBRA_VERSION" UMBRA_EGRESS_LOG="$EGRESS_LOG" \
+        UMBRA_NET_DEFAULT="$UMBRA_NET" exec "$tui" "$@"
+}
+
+usage() {
+    cat <<EOF
+umbra $UMBRA_VERSION -- microVM sandbox for AI coding CLIs
+
+usage:
+  umbra                               interactive launcher (TUI)
+  umbra <tool> [args...]              run a tool in \$PWD (claude, agy, opencode)
+  umbra run [options] <tool> [args]   same, with options
+  umbra shell [options] <tool>        bash inside that tool's VM
+  umbra exec [options] <tool> <cmd>   any command inside that tool's VM
+  umbra login <tool>                  the tool's sign-in flow inside its VM
+
+  umbra allow <domain>... / deny <domain>...   edit the egress lists
+  umbra egress [N]                    last N egress decisions
+
+  umbra diff [dir]                    what changed since the last session's snapshot
+  umbra undo [-y] [dir] [snapshot]    roll the project back to a snapshot
+  umbra snapshots [dir]               list snapshots
+
+  umbra import [--force] <tool> [v1|host]   seed a tool's sandbox home
+  umbra update [tool...]              update the host installs (vendor updaters)
+  umbra doctor | selftest [tool]      check setup / verify isolation from inside
+  umbra audit [tool]                  verify a live VM from outside and inside, with canaries
+
+options (before the tool name):
+  --net=ask|strict|open|host|none     egress mode (default: $UMBRA_NET)
+  --clipboard=bridge|off
+  --gh / --no-gh                      pass a GitHub token + git credential helper
+  --workspace=DIR / --no-workspace
+  --ro=PATH / --rw=PATH               extra mount at the same path (repeatable)
+  --ephemeral                         throwaway copy of the tool's own state
+  --no-snapshot                       skip this session's project snapshot
+  --no-git-protect                    let the VM write .git/config and .git/hooks
+  --force                             allow mounting a sensitive directory read-write
+  -v, --verbose                       print the full sandbox command
+
+The real binary is always reachable unsandboxed as: command <tool>
+EOF
+}
+
+# ---------------------------------------------------------------- main -----
+main() {
+    if [ $# -eq 0 ]; then
+        if [ -t 0 ] && [ -t 1 ]; then cmd_tui; else usage; fi
+        return
+    fi
+    local sub="$1"
+    case "$sub" in
+    run) shift; cmd_run "$@" ;;
+    exec) shift; cmd_exec "$@" ;;
+    shell) shift; cmd_shell "$@" ;;
+    login) shift; cmd_login "$@" ;;
+    import) shift; cmd_import "$@" ;;
+    update) shift; cmd_update "$@" ;;
+    allow) shift; cmd_allow "$@" ;;
+    deny) shift; cmd_deny "$@" ;;
+    egress) shift; cmd_egress "$@" ;;
+    diff) shift; cmd_diff "$@" ;;
+    undo) shift; cmd_undo "$@" ;;
+    snapshots) shift; cmd_snapshots "$@" ;;
+    doctor) shift; cmd_doctor "$@" ;;
+    selftest) shift; cmd_selftest "$@" ;;
+    audit) shift; cmd_audit "$@" ;;
+    status) shift; cmd_status "$@" ;;
+    tui) shift; cmd_tui "$@" ;;
+    help | -h | --help) usage ;;
+    version | --version) echo "umbra $UMBRA_VERSION" ;;
+    -*) cmd_run "$@" ;;
+    *)
+        if is_tool "$sub"; then cmd_run "$@"; else usage >&2; exit 2; fi
+        ;;
+    esac
+}
+
+main "$@"

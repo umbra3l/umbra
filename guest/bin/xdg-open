@@ -1,0 +1,39 @@
+#!/bin/sh
+# umbra xdg-open shim (also $BROWSER) inside the VM.
+#
+# The VM has no D-Bus, portal or compositor, so the real xdg-open can't reach
+# a browser. This drops http(s) URLs into /run/umbra/io/out/url.*; the host
+# side (bin/umbra, start_io_bridge) re-validates each one and opens it with
+# your host's xdg-open. Anything that isn't an http(s) URL is refused, so the
+# agent can't use this to launch other handlers (file://, custom schemes,
+# local paths).
+#
+# On failure the URL is printed, so CLIs that fall back to "open this link
+# manually" still work.
+url="${1:-}"
+out=/run/umbra/io/out
+
+case "$url" in
+http://* | https://*) ;;
+*)
+	echo "umbra: xdg-open inside the sandbox only opens http(s) URLs: $url" >&2
+	exit 1
+	;;
+esac
+case "$url" in
+*[[:space:][:cntrl:]]*)
+	echo "umbra: refusing URL with whitespace/control characters" >&2
+	exit 1
+	;;
+esac
+
+if [ -d "$out" ] && [ -w "$out" ]; then
+	tmp="$out/.url.$$"
+	if printf '%s\n' "$url" >"$tmp" && mv -f "$tmp" "$out/url.$$.$(date +%s%N)"; then
+		exit 0
+	fi
+	rm -f "$tmp"
+fi
+
+echo "Open this URL in your browser: $url" >&2
+exit 1

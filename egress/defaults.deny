@@ -1,0 +1,20 @@
+# umbra default egress denylist -- refused quietly, never prompted.
+#
+# Telemetry / crash-report / self-update endpoints the CLIs phone home to.
+# Blocking them changes nothing you'd notice (the binaries are read-only in
+# the VM and updated on the host with `umbra update`) and keeps them out of
+# the prompts. Deny beats allow; if you want one back, remove it here.
+sentry.io
+ingest.sentry.io
+datadoghq.com
+datadoghq.eu
+segment.io
+segment.com
+mixpanel.com
+amplitude.com
+posthog.com
+honeycomb.io
+bugsnag.com
+
+# agy's self-updater (Cloud Run; updates run on the host instead)
+antigravity-cli-auto-updater-974169037036.us-central1.run.app

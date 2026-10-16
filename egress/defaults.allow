@@ -1,0 +1,47 @@
+# umbra default egress allowlist (shipped; don't edit -- add your own entries
+# to ~/.config/umbra/egress/allow, or click "Always allow" on a prompt).
+#
+# An entry covers the domain and all its subdomains on ports 80/443.
+# "host:port" entries cover exactly that port. Lines starting with # are
+# comments. Kept deliberately narrow: every entry here is a place an agent
+# could send data without asking you, so general-purpose upload/paste/doc
+# services are NOT on it (they prompt).
+
+# --- Claude Code
+anthropic.com
+claude.ai
+claude.com
+
+# --- Antigravity (agy) / Google model APIs, sign-in, feature flags, avatars
+googleapis.com
+antigravity.google
+antigravity-unleash.goog
+accounts.google.com
+lh3.googleusercontent.com
+# agy browser automation downloads Playwright's Chromium builds (exact hosts;
+# never azureedge.net as a whole -- anyone can serve content from it)
+playwright.azureedge.net
+playwright-akamai.azureedge.net
+playwright-verizon.azureedge.net
+cdn.playwright.dev
+
+# --- OpenCode
+opencode.ai
+models.dev
+
+# --- source hosting (read-mostly; pushing still needs credentials you didn't pass)
+github.com
+githubusercontent.com
+gitlab.com
+
+# --- package registries
+registry.npmjs.org
+registry.yarnpkg.com
+jsr.io
+pypi.org
+files.pythonhosted.org
+crates.io
+static.rust-lang.org
+proxy.golang.org
+sum.golang.org
+bun.sh

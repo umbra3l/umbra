@@ -1,0 +1,15 @@
+{
+  "name": "umbra-tui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "build": "bun build --compile --outfile ../build/umbra-tui src/index.ts"
+  },
+  "dependencies": {
+    "@opentui/core": "^0.5.11"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.0"
+  }
+}

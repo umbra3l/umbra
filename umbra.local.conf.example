@@ -1,0 +1,19 @@
+# Copy to umbra.local.conf (gitignored) for this machine's settings. It is
+# read before umbra.conf, so anything set here wins over the shipped
+# defaults. Use ': "${VAR:=value}"' for plain settings to keep one-off env
+# overrides (UMBRA_NET=open claude) working.
+
+# Bigger VMs (boot time grows ~25 ms per vCPU; RAM is only a ceiling)
+# : "${UMBRA_VM_CPUS:=8}"
+# : "${UMBRA_VM_RAM:=8192}"
+
+# Arrays replace the default list, so repeat the entries you want to keep.
+# UMBRA_RO_BINDS=(
+#     "$HOME/.config/nvim"
+#     "$HOME/.local/share/nvim"
+#     "$HOME/.config/git/ignore"
+#     "$HOME/Pictures/Screenshots"
+# )
+
+# A host binary one tool needs, e.g. an MCP server for opencode
+# UMBRA_RO_BINDS_opencode=("$HOME/bin/github-mcp-server")

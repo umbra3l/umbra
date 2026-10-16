@@ -1,0 +1,475 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-16T11:03:25.886911+00:00",
+  "title": "Design System: umbra",
+  "extensions": {
+    "platform": "terminal (OpenTUI + Bun); colours are live ANSI palette roles, example hexes are theme.ts FALLBACK",
+    "colorMeta": {
+      "night": {
+        "role": "neutral",
+        "displayName": "Night",
+        "canonical": "OSC 11 default background, else ANSI 0",
+        "exampleFallback": "#141414",
+        "tonalRamp": [
+          "#262626",
+          "#434343",
+          "#616161",
+          "#7E7E7E",
+          "#9B9B9B",
+          "#B8B8B8",
+          "#D5D5D5",
+          "#F2F2F2"
+        ]
+      },
+      "ink-fg": {
+        "role": "neutral",
+        "displayName": "Foreground Ink",
+        "canonical": "OSC 10 default foreground, else ANSI 15; floor 7:1 on night",
+        "exampleFallback": "#C6C3C3",
+        "tonalRamp": [
+          "#272525",
+          "#454242",
+          "#635E5E",
+          "#817A7A",
+          "#9D9898",
+          "#BAB6B6",
+          "#D6D4D4",
+          "#F3F2F2"
+        ]
+      },
+      "ink-dim": {
+        "role": "neutral",
+        "displayName": "Dim Ink",
+        "canonical": "ANSI 8; floor 4.5:1 on night",
+        "exampleFallback": "#92908F",
+        "tonalRamp": [
+          "#272626",
+          "#444342",
+          "#62605F",
+          "#7F7D7C",
+          "#9C9A99",
+          "#B9B8B7",
+          "#D6D5D5",
+          "#F2F2F2"
+        ]
+      },
+      "hair": {
+        "role": "neutral",
+        "displayName": "Hair",
+        "canonical": "mix(night, fg, 0.28 dark / 0.35 light)",
+        "exampleFallback": "#464545",
+        "tonalRamp": [
+          "#272626",
+          "#444343",
+          "#616060",
+          "#7F7D7D",
+          "#9C9A9A",
+          "#B8B7B7",
+          "#D5D5D5",
+          "#F2F2F2"
+        ]
+      },
+      "hair-front": {
+        "role": "neutral",
+        "displayName": "Front Hair",
+        "canonical": "mix(hair, fg, 0.22)",
+        "exampleFallback": "#626161",
+        "tonalRamp": [
+          "#262626",
+          "#444343",
+          "#616060",
+          "#7E7D7D",
+          "#9B9A9A",
+          "#B8B8B8",
+          "#D5D5D5",
+          "#F2F2F2"
+        ]
+      },
+      "core": {
+        "role": "neutral",
+        "displayName": "Core",
+        "canonical": "dark: mix(night, black, 0.6); light: mix(fg, night, 0.12)",
+        "exampleFallback": "#080808",
+        "tonalRamp": [
+          "#262626",
+          "#434343",
+          "#616161",
+          "#7E7E7E",
+          "#9B9B9B",
+          "#B8B8B8",
+          "#D5D5D5",
+          "#F2F2F2"
+        ]
+      },
+      "tool-claude": {
+        "role": "primary",
+        "displayName": "Claude Ink",
+        "canonical": "ANSI 1; floor 3:1 on night",
+        "exampleFallback": "#FF98AB",
+        "tonalRamp": [
+          "#4C000E",
+          "#870019",
+          "#C10024",
+          "#FB002E",
+          "#FF375C",
+          "#FF718B",
+          "#FFABBB",
+          "#FFE6EA"
+        ]
+      },
+      "tool-opencode": {
+        "role": "primary",
+        "displayName": "OpenCode Ink",
+        "canonical": "ANSI 4; floor 3:1 on night",
+        "exampleFallback": "#65C1EC",
+        "tonalRamp": [
+          "#083144",
+          "#0F5678",
+          "#157CAC",
+          "#1CA1E0",
+          "#4DB7E9",
+          "#81CCEF",
+          "#B4E1F6",
+          "#E8F6FC"
+        ]
+      },
+      "tool-agy": {
+        "role": "primary",
+        "displayName": "Antigravity Ink",
+        "canonical": "ANSI 2; floor 3:1 on night",
+        "exampleFallback": "#73C791",
+        "tonalRamp": [
+          "#163722",
+          "#27603B",
+          "#378A55",
+          "#48B46E",
+          "#70C68F",
+          "#9AD6AF",
+          "#C3E7D0",
+          "#EDF8F1"
+        ]
+      },
+      "halo": {
+        "role": "secondary",
+        "displayName": "Halo Violet",
+        "canonical": "ANSI 5; floor 3:1 on night",
+        "exampleFallback": "#CDA6F6",
+        "tonalRamp": [
+          "#250745",
+          "#420C7A",
+          "#5F12AF",
+          "#7B17E4",
+          "#9949ED",
+          "#B77EF2",
+          "#D4B3F7",
+          "#F2E8FD"
+        ]
+      },
+      "warn": {
+        "role": "tertiary",
+        "displayName": "Warning Yellow",
+        "canonical": "ANSI 3; floor 3:1 on night",
+        "exampleFallback": "#C4B84E",
+        "tonalRamp": [
+          "#393513",
+          "#655E22",
+          "#918730",
+          "#BDB03F",
+          "#CDC369",
+          "#DBD494",
+          "#EAE6C0",
+          "#F9F7EC"
+        ]
+      },
+      "danger": {
+        "role": "tertiary",
+        "displayName": "Danger",
+        "canonical": "ANSI 1; floor 3:1 on night",
+        "exampleFallback": "#FF98AB",
+        "tonalRamp": [
+          "#4C000E",
+          "#870019",
+          "#C10024",
+          "#FB002E",
+          "#FF375C",
+          "#FF718B",
+          "#FFABBB",
+          "#FFE6EA"
+        ]
+      },
+      "ok": {
+        "role": "tertiary",
+        "displayName": "OK",
+        "canonical": "ANSI 2; floor 3:1 on night",
+        "exampleFallback": "#73C791",
+        "tonalRamp": [
+          "#163722",
+          "#27603B",
+          "#378A55",
+          "#48B46E",
+          "#70C68F",
+          "#9AD6AF",
+          "#C3E7D0",
+          "#EDF8F1"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display",
+        "purpose": "The selected tool's name only; baked URW Gothic Demi half-block bitmaps."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Product mark, full tool name, reader titles, pill label; bold."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Action labels, paths, reader content; terminal font, regular fg."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Versions, hints, facts, hint-bar words; dim."
+      }
+    },
+    "glyphs": {
+      "braille": "U+2800 block: hairlines, orbits, halo, rings, stars, spinner",
+      "halfBlock": "▀ with fg/bg: fills, core, bodies, glow, display type",
+      "marks": {
+        "●": "product mark / live sessions",
+        "◆": "project in status line",
+        "◇": "no project mounted",
+        "▲": "host-executed files changed",
+        "⏎": "launch key"
+      },
+      "ticks": "┌─ ─┐ └─ ─┘"
+    },
+    "shadows": [
+      {
+        "name": "corona",
+        "value": "radial half-block glow from 0.95 to 1.9 core radii in selected ink, strength 0.34 to 0.44 (+0.55 flare)",
+        "purpose": "Light around the core; one of exactly two glows."
+      },
+      {
+        "name": "selected-body-glow",
+        "value": "radial glow from 1.05 to 2.1 body radii, strength 0.2",
+        "purpose": "The selected body only."
+      },
+      {
+        "name": "recede",
+        "value": "scene mixed up to 62% toward night; labels 60%",
+        "purpose": "Scene sinks into shadow behind reader views."
+      }
+    ],
+    "motion": [
+      {
+        "name": "swing",
+        "value": "600 ms, expo-out (1 - 2^(-10t))",
+        "purpose": "System turns by one shared delta so the selected body reaches the front."
+      },
+      {
+        "name": "emerge",
+        "value": "850 ms, expo-out; body grows from 35% scale; corona flare decays at 2.2/s",
+        "purpose": "After any VM hand-off the selected body rises from the core."
+      },
+      {
+        "name": "entrance",
+        "value": "550 ms, cubic in-out; bodies appear over 450 ms + 120 ms per index",
+        "purpose": "Orbits draw on at start."
+      },
+      {
+        "name": "name-slide",
+        "value": "320 ms, expo-out; new name enters from 5 cells right, old leaves 4 cells left",
+        "purpose": "Display name change on tool select."
+      },
+      {
+        "name": "reader-recede",
+        "value": "exponential approach, rate 14/s; reader enters from 6 cells right, list leaves 4 cells left",
+        "purpose": "Reader views slide in on one axis while the scene dims up to 62%."
+      },
+      {
+        "name": "pill-glide",
+        "value": "exponential approach, rate 26/s",
+        "purpose": "Focused pill follows the cursor between rows."
+      },
+      {
+        "name": "pill-flash",
+        "value": "40 ms, pill mixed 45% toward fg",
+        "purpose": "Enter feedback, held two frames before the hand-off."
+      },
+      {
+        "name": "last-session-fade",
+        "value": "held 0.3 s, then 0.6 s expo-out fade-in",
+        "purpose": "Session summary arrives with the emerging body."
+      },
+      {
+        "name": "audit-sweep",
+        "value": "3.2 rad/s clockwise, 30 dots, tail falloff (k/30)^1.3",
+        "purpose": "Audit in progress, drawn on top of the halo ring."
+      },
+      {
+        "name": "corona-breathe",
+        "value": "0.9 rad/s, strength 0.34 to 0.44",
+        "purpose": "Idle life of the core."
+      },
+      {
+        "name": "halo-ask-turn",
+        "value": "dash phase advances 6 samples/s",
+        "purpose": "Ask mode halo slowly turns."
+      },
+      {
+        "name": "drift",
+        "value": "0.021, 0.014, 0.010 rad/s per orbit",
+        "purpose": "Idle drift of unselected bodies; one lap in 5 to 10 minutes."
+      },
+      {
+        "name": "frame-budget",
+        "value": "60 fps while animating, 20 fps idle, 12 fps with UMBRA_REDUCED_MOTION=1 (all transitions instant)",
+        "purpose": "Loop rate."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "tiny",
+        "value": "width < 64 cols, or height < 20 rows, or stack orrery < 9 rows"
+      },
+      {
+        "name": "stack",
+        "value": "default between tiny and wide; orrery up to 44% height, max 30 rows"
+      },
+      {
+        "name": "wide",
+        "value": "width >= 118 cols and width/height >= 1.85; orrery 52% width"
+      },
+      {
+        "name": "chrome-inset",
+        "value": "height >= 32 rows: header and status line inset one row"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Focused Action Pill",
+      "kind": "button",
+      "refersTo": "action-pill",
+      "description": "The focused action: a flat cell-high pill in the selected tool's ink; flashes toward fg for 40 ms on Enter.",
+      "html": "<div class=\"ds-actions\"><span class=\"ds-pill\"><b>⏎</b>  <b>Launch</b>  </span>    <span class=\"ds-hint\">in …/scratchpad/proj</span></div>",
+      "css": ".ds-actions{font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 14px; line-height: 1.25; white-space: pre; background: #141414; color:#C6C3C3; padding:8px;} .ds-pill{background:#FF98AB; color:#141414; padding:0 0.6ch; transition:background 40ms;} .ds-pill:active{background:#E8AEB8;} .ds-pill:focus-visible{outline:none; background:#FF98AB;} .ds-hint{color:#92908F;}"
+    },
+    {
+      "name": "Action Row",
+      "kind": "button",
+      "refersTo": "action-row",
+      "description": "A resting action: dim key letter, fg label, dim hint.",
+      "html": "<div class=\"ds-row\"><span class=\"ds-key\">s</span>  <span class=\"ds-label\">Shell</span>    <span class=\"ds-hint\">bash inside this VM</span></div>",
+      "css": ".ds-row{font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 14px; line-height: 1.25; white-space: pre; background: #141414; padding:8px;} .ds-key{color:#92908F;} .ds-label{color:#C6C3C3;} .ds-row:hover .ds-label{color:#141414; background:#FF98AB;} .ds-hint{color:#92908F;}"
+    },
+    {
+      "name": "Disabled Action Row",
+      "kind": "button",
+      "refersTo": "action-row-disabled",
+      "description": "Unavailable action: label struck through in dim, reason in the hint.",
+      "html": "<div class=\"ds-row-off\"><span class=\"ds-key\">u</span>  <span class=\"ds-label\">Undo last session</span>    <span class=\"ds-hint\">no snapshot yet</span></div>",
+      "css": ".ds-row-off{font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 14px; line-height: 1.25; white-space: pre; background: #141414; padding:8px;} .ds-row-off .ds-key{color:#464545;} .ds-row-off .ds-label{color:#92908F; text-decoration:line-through;} .ds-row-off .ds-hint{color:#464545;}"
+    },
+    {
+      "name": "Header",
+      "kind": "nav",
+      "refersTo": "header",
+      "description": "Product mark on the left; egress mode, vCPU and RAM on the right.",
+      "html": "<div class=\"ds-header\"><span><span class=\"ds-dot\">●</span> <b>umbra</b> <span class=\"ds-dim\">v2.0</span></span><span><span class=\"ds-dim\">egress </span><b class=\"ds-halo\">ask</b><span class=\"ds-dim\">  ·  8 vCPU · 8 GiB</span></span></div>",
+      "css": ".ds-header{font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 14px; line-height: 1.25; white-space: pre; background: #141414; color:#C6C3C3; display:flex; justify-content:space-between; padding:8px 2ch;} .ds-dot{color:#FF98AB;} .ds-dim{color:#92908F;} .ds-halo{color:#CDA6F6;}"
+    },
+    {
+      "name": "Status Line",
+      "kind": "nav",
+      "refersTo": "status-line",
+      "description": "Project, branch, snapshots and other live tools on the left; key hints with keys in fg on the right.",
+      "html": "<div class=\"ds-status\"><span><span class=\"ds-dia\">◆</span> <span class=\"ds-fg\">…/scratchpad/proj</span>  master  ·  16 snapshots, last 4 h ago</span><span><span class=\"ds-fg\">←→</span> tool  <span class=\"ds-fg\">↑↓</span> action  <span class=\"ds-fg\">⏎</span> run  <span class=\"ds-fg\">q</span> quit</span></div>",
+      "css": ".ds-status{font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 14px; line-height: 1.25; white-space: pre; background: #141414; color:#92908F; display:flex; justify-content:space-between; padding:8px 2ch;} .ds-dia{color:#FF98AB;} .ds-fg{color:#C6C3C3;}"
+    },
+    {
+      "name": "Registration Ticks",
+      "kind": "custom",
+      "refersTo": "",
+      "description": "Four hair corner ticks mark a region instead of a box.",
+      "html": "<div class=\"ds-plate\"><span class=\"ds-tl\">┌─</span><span class=\"ds-tr\">─┐</span><span class=\"ds-bl\">└─</span><span class=\"ds-br\">─┘</span></div>",
+      "css": ".ds-plate{font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 14px; line-height: 1.25; white-space: pre; background: #141414; color:#464545; position:relative; width:320px; height:140px;} .ds-plate span{position:absolute;} .ds-tl{top:0;left:0;} .ds-tr{top:0;right:0;} .ds-bl{bottom:0;left:0;} .ds-br{bottom:0;right:0;}"
+    },
+    {
+      "name": "Orrery",
+      "kind": "custom",
+      "refersTo": "",
+      "description": "Sealed core with corona in tool ink, egress halo in violet, tilted hairline orbits; the selected body sits at the front and glows.",
+      "html": "<div class=\"ds-orrery\"><i class=\"ds-o1\"></i><i class=\"ds-o2\"></i><i class=\"ds-halo-ring\"></i><i class=\"ds-core\"></i><i class=\"ds-body\"></i></div>",
+      "css": ".ds-orrery{position:relative; width:320px; height:200px; background:#141414;} .ds-orrery i{position:absolute; border-radius:50%; left:50%; top:50%; transform:translate(-50%,-50%);} .ds-o1{width:300px; height:140px; border:1px dotted #464545; transform:translate(-50%,-50%) rotate(-14deg)!important;} .ds-o2{width:220px; height:100px; border:1px dotted #626161; transform:translate(-50%,-50%) rotate(-14deg)!important;} .ds-halo-ring{width:76px; height:76px; border:2px dashed #CDA6F6; animation:ds-turn 12s linear infinite;} .ds-core{width:50px; height:50px; background:#080808; box-shadow:0 0 18px 8px rgba(255,152,171,0.35);} .ds-body{width:22px; height:22px; background:#FF98AB; top:80%!important; box-shadow:0 0 10px 3px rgba(255,152,171,0.2);} @keyframes ds-turn{to{transform:translate(-50%,-50%) rotate(360deg);}}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Orrery in the Umbra",
+    "overview": "The terminal's own background is the night. On it, a black core sits inside a corona coloured by the selected tool, ringed by a dotted halo that is the egress mode, and three tilted braille orbits carry one body per tool. Choosing a tool turns the whole system so its body swings to the front; launching sends it into the shadow, and when the session ends it re-emerges from behind the core. Every mark on screen is real state. Positions along the orbits are the one exception: they only keep the system alive.\n\nThe system owns no colours. Every role is an ANSI palette slot read live through OSC 4/10/11 queries and re-read on the terminal's `palette` event, so the scene follows the user's wallpaper. The hex values in the frontmatter are the FALLBACK palette in `theme.ts`, used only when the terminal stays silent; treat them as examples of a resolved theme, never as the identity. A contrast floor (`ensureContrast` in `color.ts`) pulls any slot toward the foreground until it clears its role's ratio against the background.\n\nDensity is low and type-led: one large word, a short facts block, seven or eight keyed actions, a status line. Regions have no boxes. A region is marked only by four corner registration ticks.",
+    "keyCharacteristics": [
+      "Palette roles, not colours: every ink is an ANSI index with a contrast floor.",
+      "One large thing on screen: the selected tool's name in baked display type.",
+      "Hairline braille orbits at one weight; solid shapes in anti-aliased half-blocks.",
+      "Registration ticks instead of boxes.",
+      "Damped, single-axis motion that never delays a launch."
+    ],
+    "rules": [
+      {
+        "name": "The Borrowed Palette Rule",
+        "body": "Never write a literal colour. Every ink is an ANSI slot or a mix of night, fg and black, resolved at runtime and re-resolved when the palette changes.",
+        "section": "colors"
+      },
+      {
+        "name": "The Floor Rule",
+        "body": "Inks clear 3:1, dim clears 4.5:1, fg clears 7:1 against night; `ensureContrast` moves the slot toward fg in 5% steps until it does.",
+        "section": "colors"
+      },
+      {
+        "name": "The One Meaning Rule",
+        "body": "Halo violet means egress; yellow means real risk. Neither appears as decoration.",
+        "section": "colors"
+      },
+      {
+        "name": "The One Large Word Rule",
+        "body": "Only the selected tool's name is display-sized. Everything else is one cell tall.",
+        "section": "typography"
+      },
+      {
+        "name": "The Inherited Face Rule",
+        "body": "Body text uses whatever font the terminal uses; the system never asks for a face it cannot see.",
+        "section": "typography"
+      },
+      {
+        "name": "The Two Glows Rule",
+        "body": "Only the corona and the selected body glow. Unselected bodies, rings and text never do.",
+        "section": "elevation"
+      },
+      {
+        "name": "The Front Window Rule",
+        "body": "The front of the orbits belongs to the selected body. Other bodies are pushed out of a 1-radian window on selection and never drift into a 0.9-radian window at rest.",
+        "section": "elevation"
+      },
+      {
+        "name": "The No Box Rule",
+        "body": "No borders, frames or panels. A region is announced by four corner ticks or by nothing.",
+        "section": "shapes"
+      }
+    ],
+    "dos": [
+      "**Do** take every ink from an ANSI slot through `buildTheme`, and re-read it on the palette event.",
+      "**Do** mark regions with corner registration ticks in hair.",
+      "**Do** keep motion on one axis and damped: exponential ease-out for swings and slides, cubic in-out only for the orbits drawing on (550 ms).",
+      "**Do** honour `UMBRA_REDUCED_MOTION=1`: every transition becomes instant and the loop drops to 12 fps.",
+      "**Do** tie every mark to real state; if a mark has no state behind it, it goes."
+    ],
+    "donts": [
+      "**Don't** draw boxes, borders or framed panels around any region.",
+      "**Don't** set a second word in display type, or use display type outside the three baked tool names.",
+      "**Don't** use halo violet or warn yellow for anything but egress and real risk.",
+      "**Don't** let any animation delay Enter: launch is the main act.",
+      "**Don't** go hacker cliché: no neon green, glitch, matrix rain or \"cyber\" styling."
+    ]
+  }
+}

@@ -1,0 +1,37 @@
+#!/bin/bash
+# umbra enter -- last host-side stage before bwrap.
+#
+#   enter <nft-ruleset-file|-> <seccomp-bpf-file|-> -- bwrap [bwrap args...]
+#
+# In network mode "isolated" this runs inside the user+network namespace that
+# pasta created, where it is uid 0 *of that namespace only* and holds
+# CAP_NET_ADMIN over the sandbox's private network stack (and nothing on the
+# host). It uses that to install the egress firewall, then execs bwrap,
+# which re-maps to your real UID and drops every capability -- so the
+# agent can't read, flush or change the rules (verified: `nft list ruleset`
+# fails inside the sandbox).
+#
+# In modes "host"/"none" it runs as you, with no namespaces of its own, and
+# only opens the seccomp program for bwrap.
+set -euo pipefail
+
+nft_rules="$1"
+bpf="$2"
+shift 2
+[ "${1:-}" = "--" ] && shift
+
+if [ "$nft_rules" != "-" ]; then
+    if ! nft -f "$nft_rules"; then
+        echo "umbra: could not install the sandbox egress firewall; refusing to start." >&2
+        echo "umbra: (set UMBRA_ALLOW_LAN=1 or use --net=host to run without it)" >&2
+        exit 125
+    fi
+fi
+
+if [ "$bpf" != "-" ]; then
+    # bwrap was given "--seccomp 9" by bin/umbra; the fd has to be opened
+    # here, after pasta, because pasta doesn't pass extra fds to its child.
+    exec 9<"$bpf"
+fi
+
+exec "$@"

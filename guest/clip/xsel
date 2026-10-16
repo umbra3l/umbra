@@ -1,0 +1,40 @@
+#!/bin/sh
+# umbra xsel shim (clipboard mode "bridge"). Same file-bridge contract as
+# guest/clip/xclip:
+#   read:  served from /run/umbra/io/in/latest.png when has-image exists
+#   write: stdin dropped into /run/umbra/io/out/{clipboard,primary}.new
+#
+#   xsel --clipboard --output    (also -b -o)
+#   xsel --clipboard --input     (also -b -i, or plain stdin)
+in=/run/umbra/io/in
+out=/run/umbra/io/out
+
+mode="write"
+selection="clipboard"
+while [ $# -gt 0 ]; do
+	case "$1" in
+	-o | --output) mode="read" ;;
+	-i | --input) mode="write" ;;
+	-b | --clipboard) selection="clipboard" ;;
+	-p | --primary) selection="primary" ;;
+	-s | --secondary) exit 1 ;;
+	-c | --clear | -d | --delete) exit 0 ;;
+	-bo | -ob) mode="read"; selection="clipboard" ;;
+	-bi | -ib) mode="write"; selection="clipboard" ;;
+	esac
+	shift
+done
+
+if [ "$mode" = "read" ]; then
+	[ "$selection" = "clipboard" ] || exit 1
+	[ -f "$in/has-image" ] || exit 1
+	cat "$in/latest.png"
+	exit 0
+fi
+
+case "$selection" in
+primary) dest="$out/primary.new" ;;
+*) dest="$out/clipboard.new" ;;
+esac
+tmp="$dest.tmp.$$"
+cat >"$tmp" && mv -f "$tmp" "$dest"

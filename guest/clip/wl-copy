@@ -1,0 +1,34 @@
+#!/bin/sh
+# umbra wl-copy shim (clipboard mode "bridge"). Guest -> host only: stdin
+# (or the arguments, like the real wl-copy) is dropped into
+# /run/umbra/io/out/{clipboard,primary}.new and relayed into the real
+# clipboard by the host. PNG payloads are offered as image/png.
+#
+#   wl-copy [-t TYPE] [TEXT...]
+#   wl-copy --primary ...
+#   wl-copy --clear            -> no-op
+out=/run/umbra/io/out
+
+selection="clipboard"
+while [ $# -gt 0 ]; do
+	case "$1" in
+	-c | --clear) exit 0 ;;
+	-p | --primary) selection="primary"; shift ;;
+	-t | --type) shift 2 || shift ;;
+	-n | --trim-newline | -f | --foreground | -o | --paste-once | -r | --regular) shift ;;
+	--) shift; break ;;
+	-*) shift ;;
+	*) break ;;
+	esac
+done
+
+case "$selection" in
+primary) dest="$out/primary.new" ;;
+*) dest="$out/clipboard.new" ;;
+esac
+tmp="$dest.tmp.$$"
+if [ $# -gt 0 ]; then
+	printf '%s' "$*" >"$tmp" && mv -f "$tmp" "$dest"
+else
+	cat >"$tmp" && mv -f "$tmp" "$dest"
+fi

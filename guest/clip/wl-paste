@@ -1,0 +1,31 @@
+#!/bin/sh
+# umbra wl-paste shim (clipboard mode "bridge"). Host -> guest, images only:
+# answers from /run/umbra/io/in, which the host keeps in sync with the
+# host clipboard's image/png content.
+#
+#   wl-paste --list-types        -> "image/png" iff an image is on the clipboard
+#   wl-paste -t image/png [-n]   -> PNG bytes on stdout
+# Anything else (text) exits 1 so callers fall back; text paste already
+# works natively through the terminal.
+in=/run/umbra/io/in
+
+type=""
+list_types=0
+while [ $# -gt 0 ]; do
+	case "$1" in
+	-t | --type) type="${2:-}"; shift 2 || shift ;;
+	-l | --list-types) list_types=1; shift ;;
+	-p | --primary) exit 1 ;;
+	*) shift ;;
+	esac
+done
+
+[ -f "$in/has-image" ] || exit 1
+if [ "$list_types" = 1 ]; then
+	echo "image/png"
+	exit 0
+fi
+case "$type" in
+"" | image/png | image/*) cat "$in/latest.png" ;;
+*) exit 1 ;;
+esac

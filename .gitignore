@@ -1,0 +1,16 @@
+# build outputs (install.sh recreates them)
+build/
+tui/node_modules/
+
+# this machine's settings and secrets
+umbra.local.conf
+secrets/*
+!secrets/*.example
+egress/allow
+egress/deny
+
+# old launcher, design working files
+.v1-archive/
+.impeccable/*
+!.impeccable/design.json
+!.impeccable/surfaces/

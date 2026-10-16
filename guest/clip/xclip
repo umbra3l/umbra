@@ -1,0 +1,69 @@
+#!/bin/sh
+# umbra xclip shim (clipboard mode "bridge").
+#
+# Claude Code's Linux clipboard code shells out to xclip for both directions:
+#   read (paste):  xclip -selection clipboard -t TARGETS -o
+#                  xclip -selection clipboard -t image/png -o > tmpfile
+#   write (copy):  xclip -selection clipboard   (text on stdin)
+#                  xclip -selection primary     (same, primary selection)
+#
+# The sandbox has no compositor connection. Instead, the host side
+# (bin/umbra, start_clipboard_bridge) keeps
+#   /run/umbra/io/in/latest.png + has-image   (read-only, PNG only)
+# in sync with the host clipboard, and relays anything written to
+#   /run/umbra/io/out/{clipboard,primary}.new
+# into the real clipboard. Text on the host clipboard is never exposed to
+# the sandbox; text paste works natively over the terminal (bracketed
+# paste).
+in=/run/umbra/io/in
+out=/run/umbra/io/out
+
+type=""
+selection="clipboard"
+mode="write"
+while [ $# -gt 0 ]; do
+	case "$1" in
+	-t | -target)
+		type="${2:-}"
+		shift 2 || shift
+		;;
+	-o | -out)
+		mode="read"
+		shift
+		;;
+	-i | -in)
+		mode="write"
+		shift
+		;;
+	-selection | -select | -sel)
+		selection="${2:-clipboard}"
+		shift 2 || shift
+		;;
+	*)
+		shift
+		;;
+	esac
+done
+
+if [ "$mode" = "read" ]; then
+	[ -f "$in/has-image" ] || exit 1
+	case "$type" in
+	TARGETS)
+		echo "image/png"
+		;;
+	image/png)
+		cat "$in/latest.png"
+		;;
+	*)
+		exit 1
+		;;
+	esac
+	exit 0
+fi
+
+case "$selection" in
+primary | p) dest="$out/primary.new" ;;
+*) dest="$out/clipboard.new" ;;
+esac
+tmp="$dest.tmp.$$"
+cat >"$tmp" && mv -f "$tmp" "$dest"
