@@ -9,6 +9,9 @@ One bitmap per word per pixel height. A half-block pixel is one cell wide and
 half a cell tall, i.e. roughly square in a typical terminal font. Heights are
 font-metric heights (ascent + descent), identical for every word at a size,
 so names share a baseline. Requires ImageMagick only at bake time.
+
+  python3 -I tools/bake-type.py --word umbra --height 14   # one bitmap as JSON
+                                                         # (tools/banner.ts)
 """
 import base64, subprocess, sys
 
@@ -31,6 +34,17 @@ def render(word, h):
          "-filter", "box", "-resize", f"{w}x{h}!", "-colorspace", "gray", "-depth", "8", "gray:-"],
         capture_output=True, check=True).stdout
     return w, h, raw
+
+if len(sys.argv) == 5 and sys.argv[1] == "--word" and sys.argv[3] == "--height":
+    import json
+    w, h, raw = render(sys.argv[2], int(sys.argv[4]))
+    rows = [r for r in range(h) if max(raw[r*w:(r+1)*w]) > 8]
+    cols = [c for c in range(w) if any(raw[r*w + c] > 8 for r in rows)]
+    r0, r1, c0, c1 = rows[0], rows[-1] + 1, cols[0], cols[-1] + 1
+    if (r1 - r0) % 2: r1 = r1 + 1 if r1 < h else r1; r0 = r0 - 1 if (r1 - r0) % 2 else r0
+    data = bytes(raw[r*w + c] for r in range(r0, r1) for c in range(c0, c1))
+    print(json.dumps({"w": c1 - c0, "h": r1 - r0, "data": base64.b64encode(data).decode()}))
+    sys.exit(0)
 
 out = {}
 for h in HEIGHTS:

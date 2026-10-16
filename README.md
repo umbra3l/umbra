@@ -1,3 +1,9 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/banner-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/banner-light.png">
+  <img alt="umbra v2.0: claude, opencode and agy orbiting a sealed core, beside the umbra wordmark" src="docs/banner-dark.png" width="100%">
+</picture>
+
 # umbra v2.0
 
 A microVM sandbox for AI coding CLIs (**Claude Code**, **Antigravity `agy`**,
@@ -252,6 +258,7 @@ VMs, or into your shell.
 ├── egress/                 defaults.allow, defaults.deny, your allow / deny
 ├── secrets/<tool>.env      per-tool secrets (mode 600, gitignored; *.example templates)
 ├── tui/                    the umbra v2.0 TUI (OpenTUI/Bun)
+├── docs/banner-*.png       README banner, drawn by the TUI's own code (tui/tools/banner.ts)
 ├── shell/umbra.fish|bash   claude / agy / opencode wrappers
 ├── umbra.conf              shipped defaults
 ├── umbra.local.conf        your settings (gitignored; see umbra.local.conf.example)
