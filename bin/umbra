@@ -12,7 +12,7 @@ set -euo pipefail
 shopt -s nullglob
 
 UMBRA_ROOT="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." && pwd -P)"
-UMBRA_VERSION="2.0.0"
+UMBRA_VERSION="2.1.0"
 G=/guest  # where the guest's root tree is assembled inside the jail
 
 die() { printf 'umbra: %s\n' "$*" >&2; exit 1; }

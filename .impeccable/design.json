@@ -377,7 +377,7 @@
       "kind": "nav",
       "refersTo": "header",
       "description": "Product mark on the left; egress mode, vCPU and RAM on the right.",
-      "html": "<div class=\"ds-header\"><span><span class=\"ds-dot\">●</span> <b>umbra</b> <span class=\"ds-dim\">v2.0</span></span><span><span class=\"ds-dim\">egress </span><b class=\"ds-halo\">ask</b><span class=\"ds-dim\">  ·  8 vCPU · 8 GiB</span></span></div>",
+      "html": "<div class=\"ds-header\"><span><span class=\"ds-dot\">●</span> <b>umbra</b> <span class=\"ds-dim\">v2.1</span></span><span><span class=\"ds-dim\">egress </span><b class=\"ds-halo\">ask</b><span class=\"ds-dim\">  ·  8 vCPU · 8 GiB</span></span></div>",
       "css": ".ds-header{font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 14px; line-height: 1.25; white-space: pre; background: #141414; color:#C6C3C3; display:flex; justify-content:space-between; padding:8px 2ch;} .ds-dot{color:#FF98AB;} .ds-dim{color:#92908F;} .ds-halo{color:#CDA6F6;}"
     },
     {

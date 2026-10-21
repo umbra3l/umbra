@@ -55,7 +55,7 @@ A sandbox people actually keep on: the security lives in the plumbing (VM, jail,
 
 ## Brand Commitments
 
-- Name: **umbra**, lowercase in prose. The TUI shows it as the product mark with the version `v2.0`.
+- Name: **umbra**, lowercase in prose. The TUI shows it as the product mark with the version `v2.1`.
 - Colors come from the user's terminal palette (wallpaper-derived). This is the only binding visual commitment.
 - Must not look like a hacker cliché (neon green, glitch, matrix rain, "cyber" styling) or a generic TUI dashboard (boxes, borders, a list).
 

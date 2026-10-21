@@ -16,6 +16,22 @@ function pixels(bm: Bitmap): Uint8Array {
   return px
 }
 
+// Edge pixels blend in (partly) linear light: a plain sRGB mix of light ink
+// on night makes half-covered pixels too dark, a fringe that makes the
+// half-block steps read as jagged. The full 2.2 swells the strokes and
+// closes the counters at these sizes; 1.6 smooths the steps and stays crisp.
+const GAMMA = 1.6
+const toLin = (v: number): number => (v / 255) ** GAMMA
+const toSrgb = (v: number): number => 255 * v ** (1 / GAMMA)
+function blend(bg: RGB, ink: RGB, t: number): RGB {
+  if (t >= 0.999) return ink
+  return [
+    toSrgb(toLin(bg[0]) + (toLin(ink[0]) - toLin(bg[0])) * t),
+    toSrgb(toLin(bg[1]) + (toLin(ink[1]) - toLin(bg[1])) * t),
+    toSrgb(toLin(bg[2]) + (toLin(ink[2]) - toLin(bg[2])) * t),
+  ]
+}
+
 /** Largest baked size of `word` that fits in maxCols x maxRows cells. */
 export function fitWord(word: string, maxCols: number, maxRows: number): Bitmap | null {
   const sizes = TYPE[word]
@@ -57,7 +73,7 @@ export function drawWord(
       const a = (px[2 * r * bm.w + c]! / 255) * alpha
       const b = (px[(2 * r + 1) * bm.w + c]! / 255) * alpha
       if (a < 0.03 && b < 0.03) continue
-      buf.setCell(cx, y + r, "▀", rgba(mix(bg, ink, a)), rgba(mix(bg, ink, b)))
+      buf.setCell(cx, y + r, "▀", rgba(blend(bg, ink, a)), rgba(blend(bg, ink, b)))
     }
   }
 }

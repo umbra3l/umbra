@@ -1,13 +1,15 @@
 import {
   createCliRenderer,
-  FrameBufferRenderable,
+  Renderable,
   TextAttributes,
   type CliRenderer,
   type KeyEvent,
   type OptimizedBuffer,
+  type RenderContext,
 } from "@opentui/core"
 import { DotCanvas } from "./canvas"
 import { mix, rgba, type RGB } from "./color"
+import { Nebula } from "./nebula"
 import { expoOut, Orrery, type Label } from "./orrery"
 import { buildTheme, detectTheme, type Theme } from "./theme"
 import { drawWord, fitWord } from "./type"
@@ -124,8 +126,26 @@ function computeLayout(W: number, H: number): Layout {
   }
 }
 
-export async function main(): Promise<void> {
-  const renderer: CliRenderer = await createCliRenderer({ exitOnCtrlC: false, targetFps: 60, useMouse: true })
+// The whole screen, drawn during the render pass itself. A FrameBuffer would
+// be resized only after the frame callback ran, so every resize showed one
+// stale (black) frame; here `buffer` is always the terminal's current size.
+class Scene extends Renderable {
+  constructor(
+    ctx: RenderContext,
+    private paint: (buf: OptimizedBuffer) => void,
+  ) {
+    super(ctx, { id: "umbra", width: "100%", height: "100%" })
+  }
+  protected override renderSelf(buffer: OptimizedBuffer): void {
+    this.paint(buffer)
+  }
+}
+
+/** `injected` lets tools/preview.ts drive the real UI in a headless renderer. */
+export async function main(injected?: CliRenderer): Promise<void> {
+  // A short resize debounce: the default 100 ms leaves the terminal blank
+  // for the whole drag, since nothing redraws until the size settles.
+  const renderer: CliRenderer = injected ?? await createCliRenderer({ exitOnCtrlC: false, targetFps: 60, useMouse: true, debounceDelay: 16 })
   let theme: Theme = await detectTheme(renderer).catch(() => buildTheme())
   renderer.setBackgroundColor(rgba(theme.bg))
   renderer.on("palette", async () => {
@@ -136,16 +156,13 @@ export async function main(): Promise<void> {
     } catch {}
   })
 
-  const fb = new FrameBufferRenderable(renderer, { id: "umbra", width: renderer.width, height: renderer.height })
+  const fb = new Scene(renderer, (buf) => draw(buf))
   renderer.root.add(fb)
-  renderer.on("resize", (w: number, h: number) => {
-    fb.width = w
-    fb.height = h
-  })
 
   const cwd = process.cwd()
   const orrery = new Orrery(TOOLS.length, umbra.REDUCED_MOTION)
   const canvas = new DotCanvas()
+  const nebula = new Nebula(umbra.REDUCED_MOTION)
   let status: umbra.Status | null = null
   let tool = 0
   let action = 0
@@ -330,8 +347,12 @@ export async function main(): Promise<void> {
     }
   })
 
+  // The pointer stirs the nebula: hover swirls it, a click sends a shockwave.
+  fb.onMouseMove = (e) => nebula.hover(e.x, e.y)
+  fb.onMouseDrag = (e) => nebula.hover(e.x, e.y)
   fb.onMouseDown = (e) => {
     if (busy) return
+    nebula.pulse(e.x, e.y)
     if (reader) return
     const row = actionRows.find((r) => r.y === e.y && e.x >= r.x0 - 1 && e.x <= r.x1)
     if (row) {
@@ -350,6 +371,18 @@ export async function main(): Promise<void> {
   }
 
   // ----------------------------------------------------------- render --
+  // A braille dot's height over its width, from the terminal's real pixel
+  // size: cells are rarely exactly 1:2 (JetBrains Mono in kitty is ~1:2.28),
+  // and drawing as if they were turns the core into an upright oval. Falls
+  // back to 1 when the terminal doesn't report its size; quantised so a
+  // pixel of window padding doesn't make the orrery shimmer.
+  const dotAspect = (): number => {
+    const res = renderer.resolution
+    if (!res || !res.width || !res.height) return 1
+    const a = res.height / renderer.height / (res.width / renderer.width) / 2
+    return a > 0.8 && a < 1.4 ? Math.round(a * 50) / 50 : 1
+  }
+
   let lastLayout: Layout | null = null
   let last = performance.now()
   let fps = 60
@@ -365,6 +398,7 @@ export async function main(): Promise<void> {
     const now = performance.now()
     const dt = Math.min(0.1, (now - last) / 1000)
     last = now
+    nebula.update(dt)
     orrery.update(dt)
     if (nameT < 1) nameT = Math.min(1, nameT + dt / 0.32)
     if (lastDelay > 0) lastDelay = Math.max(0, lastDelay - dt)
@@ -375,13 +409,12 @@ export async function main(): Promise<void> {
     pillY += (action - pillY) * (reduced ? 1 : 1 - Math.exp(-dt * 26))
     if (Math.abs(action - pillY) < 0.02) pillY = action
 
-    const animating = flash || orrery.animating || nameT < 1 || lastFade < 1 || readerT !== target || pillY !== action || !!reader?.running
+    const animating = flash || nebula.stirring || orrery.animating || nameT < 1 || lastFade < 1 || readerT !== target || pillY !== action || !!reader?.running
     const want = reduced ? 12 : animating ? 60 : 20
     if (want !== fps) {
       fps = want
       renderer.targetFps = want
     }
-    draw(fb.frameBuffer)
   }
   renderer.setFrameCallback(tick)
   renderer.requestLive()
@@ -397,6 +430,8 @@ export async function main(): Promise<void> {
     const ts = status?.tools.find((x) => x.key === t)
     const net = ts?.net ?? status?.net ?? "ask"
     const recede = expoOut(readerT)
+    let core: { x: number; y: number; r: number } | undefined
+
 
     // Header: the mark, then this tool's sandbox at a glance.
     text(buf, "●", 2, L.top, ink())
@@ -415,13 +450,16 @@ export async function main(): Promise<void> {
     if (L.orrery) {
       const o = L.orrery
       canvas.resize(o.w, o.h)
+      canvas.aspect = dotAspect()
       canvas.clear()
       const states = TOOLS.map((k) => {
         const s = status?.tools.find((x) => x.key === k)
         return { key: k, installed: s?.installed ?? true, live: s?.live ?? 0 }
       })
-      labels = orrery.draw(canvas, { x: 0, y: 0, w: o.w * 2, h: o.h * 4 }, theme, states, net, recede)
+      labels = orrery.draw(canvas, { x: 0, y: 0, w: canvas.width, h: canvas.height }, theme, states, net, recede)
       canvas.blit(buf, o.x, o.y, bg)
+      const c = orrery.core
+      core = { x: o.x + c.x / 2, y: o.y + c.y / (4 * canvas.aspect), r: c.r / 2 }
       for (const l of labels) {
         const lx = o.x + l.x
         const ly = o.y + l.y
@@ -444,6 +482,7 @@ export async function main(): Promise<void> {
       // Tiny terminals: the orrery seen edge-on, one row tall.
       const sw = Math.max(20, Math.min(W - 4, 60))
       canvas.resize(sw, 1)
+      canvas.aspect = 1
       canvas.clear()
       const states = TOOLS.map((k) => {
         const s = status?.tools.find((x) => x.key === k)
@@ -599,5 +638,8 @@ export async function main(): Promise<void> {
         cx += text(buf, part, cx, sy, isKey ? theme.fg : theme.dim)
       }
     }
+
+    // Last: the ASCII nebula fills whatever cells are still empty sky.
+    nebula.paint(buf, theme, ink(), recede, core, dotAspect() * 2)
   }
 }

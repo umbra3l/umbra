@@ -114,7 +114,7 @@ A borrowed palette: three tool inks, one halo ink, one warning ink, and a neutra
 
 ## Typography
 
-**Display Font:** URW Gothic Demi (URW base35), pre-rasterised by `tools/bake-type.py` into coverage bitmaps for the three tool names only, drawn as `▀` half-blocks with colour-blended edges.
+**Display Font:** URW Gothic Demi (URW base35), pre-rasterised by `tools/bake-type.py` into coverage bitmaps for the three tool names only (8× supersampled, at the half-block pixel's real 1:1.1 proportions), drawn as `▀` half-blocks. Edges blend at gamma 1.6: a plain sRGB mix leaves half-covered pixels too dark, a fringe that reads as jagged steps, while full linear light (2.2) swells the strokes and closes the counters. Finer block glyphs (eighths, quadrants) were tried and rejected: fitted cell by cell they form a noisy mosaic with seams.
 **Body Font:** the terminal's own monospace, inherited, never chosen.
 
 **Character:** a round geometric display word set against plain terminal text; hierarchy is scale contrast and weight, nothing else.
@@ -132,7 +132,7 @@ A borrowed palette: three tool inks, one halo ink, one warning ink, and a neutra
 
 ## Layout
 
-The grid is the cell grid. Drawing inside the orrery happens in dot space (2 by 4 dots per cell, roughly square pixels); fills use half-blocks (1 by 2 per cell).
+The grid is the cell grid. Drawing inside the orrery happens in dot space (2 by 4 dots per cell), corrected to truly square units from the terminal's reported pixel size, since real cells are rarely exactly 1:2 (JetBrains Mono in kitty is about 1:2.28; uncorrected, the core draws as an upright oval); fills use half-blocks (1 by 2 per cell).
 
 - **Wide** (width at least 118 and width/height at least 1.85): header row; orrery at the left 52% inside registration ticks; text column 4 cells right of it, vertically centred against its space; status line at the bottom.
 - **Stack** (tall tiles): orrery on top, up to 44% of the height (max 30 rows), keeping about 15 rows for name, facts and actions; text column below it inset 4 cells, placed 30% into its free space.
@@ -154,7 +154,7 @@ When a reader view opens, the whole scene recedes into shadow, mixed up to 62% t
 
 ## Shapes
 
-The form language is the orrery's: filled discs (core, bodies), ellipses (orbits, tilted −0.24 rad), rings (halo, live-session rings, the hollow body of an uninstalled tool), and single dots (stars, the strip, the sweep). Every edge is anti-aliased by 4x4 supersampling and colour-blended into night.
+The form language is the orrery's: filled discs (core, bodies), ellipses (orbits, tilted −0.24 rad), rings (halo, live-session rings, the hollow body of an uninstalled tool), and single dots (stars, the strip, the sweep); the nebula backdrop is the one place glyphs stand in for density. Every edge is anti-aliased by 4x4 supersampling and colour-blended into night.
 
 Outside the scene there are no shapes at all, only text and one flat rectangle, the focused pill (square cell corners). Regions are marked by `┌─ ─┐ └─ ─┘` registration ticks in hair at the orrery's four corners.
 
@@ -163,14 +163,15 @@ Outside the scene there are no shapes at all, only text and one flat rectangle, 
 ## Components
 
 ### The Orrery (signature)
-A black core with a breathing corona (strength 0.34 + 0.10 breathing at 0.9 rad/s, plus a flare after a session that decays at 2.2/s) in the selected tool's ink; an egress halo at 1.55 core radii; three orbits at 0.66, 0.84 and 1.0 of the outer radius, flattened between 0.34 and 0.6 depending on room. One body per tool; the selected body is 1.3 times larger.
+A black core with a breathing corona (strength 0.34 + 0.10 breathing at 0.9 rad/s, plus a flare after a session that decays at 2.2/s) in the selected tool's ink; an egress halo at 1.55 core radii; three orbits evenly spread at 0.56, 0.78 and 1.0 of the outer radius (distinct lanes, not one band at the rim), the plane flattened between 0.42 and 0.8 depending on vertical room. One body per tool; the selected body is 1.3 times larger.
 - **Halo modes**: ask is a dashed ring (3 on, 4 off) slowly turning; strict a tight dotted ring (1 on, 2 off), still; open one faint solid ring at half strength; host a ring opened toward the viewer; none draws no halo.
 - **Body states**: installed is a filled disc; not installed a hollow ring in dim with "not installed" on its label; each live session adds a ring (up to three).
 - **Labels**: the tool key beside its body, bold in ink when selected, dim otherwise; hidden when the core occludes the body or when it would sit on another body.
-- **Select**: the whole system turns by one shared forward delta so the chosen body reaches the front; others are nudged clear of the front window. Swing is 600 ms exponential ease-out.
+- **Select**: the whole system turns by one shared forward delta so the chosen body reaches the front; others are nudged clear of the front window. The swing is a critically damped spring (ω 8.5/s): it starts gently, never overshoots, lands most of the turn in ~0.45 s and settles by ~0.8 s; a press mid-swing retargets it with its momentum intact. The selected body's size (1.3×), glow and brightness crossfade between bodies at rate 9/s instead of switching.
 - **Emerge**: after any VM hand-off, the selected body rises from the core to the front over 850 ms, growing from 35% scale, while the corona flares.
 - **Audit sweep**: while an audit runs, a 30-dot clockwise comet in the selected ink rides the halo ring on top of everything, its tail fading to night.
 - **Idle**: unselected bodies drift (one lap in 5 to 10 minutes); stars twinkle faintly.
+- **Nebula backdrop** (whole screen): an ASCII nebula (` .:-=+*#%@`) painted *last*, into every cell nothing else used, so it fills any layout at any size. Domain-warped fBm gas carries ridged filaments over large dark voids; edges are Bayer-feathered into scattered dots, and only dense knots reach `# % @`. Colour runs `halo` → the selected tool's ink → `warn` along a slow hue field, with knots leaning toward `fg`. Two layers drift apart under a slow swell. Text and fills get an elliptical calm margin (5 columns, 2 rows) so words never sit in gas; braille hairlines block only their own cell, so the gas threads between the orbits; a soft hole surrounds the core. **Pointer**: hovering swirls the gas into a vortex around the cursor and leaves a fading wake (1.4 s); a click sends a shockwave ring outward. While stirred, the loop runs at 60fps. The field is baked once (192×96 tileable) at a fixed cell scale, so a resize costs nothing (≈10 ms first frame at 250×75). Damped on light themes; frozen flat under reduced motion.
 
 ### Orbit Strip (tiny)
 The same system edge-on: a dotted hairline (hair 10% toward fg), the core with its corona at the centre, bodies sliding along by orbital angle, near ones passing in front of the core.
@@ -189,14 +190,14 @@ Full name (bold fg), version and concurrency (dim); a ● live line in the tool'
 Egress log, last session's changes and security audit slide in from 6 cells right on one axis as the action list slides 4 cells left and fades. Bold fg title, a braille spinner with "running" in tool ink while streaming, then rows of coloured spans. The egress reader prints time and tool once per run of identical values, leaving the verdict and host as the scanned column. A dim "n–m of N" range appears when the content scrolls.
 
 ### Header and Status Line
-Header: a ● in tool ink, `umbra` bold, `v2.0` dim; on the right "egress" dim, the mode bold in halo, then vCPU and RAM dim. Status line: ◆ in tool ink, the project path in fg (dim when not mounted), branch and snapshots dim, other tools' live sessions in their own ink; on the right the key hints with keys in fg and words in dim.
+Header: a ● in tool ink, `umbra` bold, `v2.1` dim; on the right "egress" dim, the mode bold in halo, then vCPU and RAM dim. Status line: ◆ in tool ink, the project path in fg (dim when not mounted), branch and snapshots dim, other tools' live sessions in their own ink; on the right the key hints with keys in fg and words in dim.
 
 ## Do's and Don'ts
 
 ### Do:
 - **Do** take every ink from an ANSI slot through `buildTheme`, and re-read it on the palette event.
 - **Do** mark regions with corner registration ticks in hair.
-- **Do** keep motion on one axis and damped: exponential ease-out for swings and slides, cubic in-out only for the orbits drawing on (550 ms).
+- **Do** keep motion on one axis and damped: a critically damped spring for the orrery's swing, exponential ease-out for slides, cubic in-out only for the orbits drawing on (550 ms).
 - **Do** honour `UMBRA_REDUCED_MOTION=1`: every transition becomes instant and the loop drops to 12 fps.
 - **Do** tie every mark to real state; if a mark has no state behind it, it goes.
 

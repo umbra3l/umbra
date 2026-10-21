@@ -6,7 +6,7 @@ anti-aliased coverage bitmaps, so the TUI can draw large type in half-block
   python3 -I tools/bake-type.py > src/typebake.ts
 
 One bitmap per word per pixel height. A half-block pixel is one cell wide and
-half a cell tall, i.e. roughly square in a typical terminal font. Heights are
+half a cell tall, about 1.1x taller than wide in kitty (PIXEL_ASPECT). Heights are
 font-metric heights (ascent + descent), identical for every word at a size,
 so names share a baseline. Requires ImageMagick only at bake time.
 
@@ -18,7 +18,11 @@ import base64, subprocess, sys
 FONT = "/usr/share/fonts/gsfonts/URWGothic-Demi.otf"
 WORDS = ["claude", "opencode", "agy"]
 HEIGHTS = [8, 10, 12, 14, 16, 18, 20, 24]  # in half-block pixels (2 per row)
-SS = 4  # supersampling factor
+SS = 8  # supersampling factor: exact-ish area coverage per pixel
+# A half-block pixel is one cell wide and half a cell tall. Terminal cells are
+# ~1:2.2 (JetBrains Mono in kitty), so the pixel is 1.1x taller than wide;
+# baking as if it were square stretched every name ~10% too wide.
+PIXEL_ASPECT = 1.1
 
 def render(word, h):
     # Render large, then area-average down: crisp coverage values.
@@ -27,7 +31,7 @@ def render(word, h):
          "-pointsize", str(h * SS * 1.18), f"label:{word}", "-depth", "8",
          "-format", "%w %h", "info:"], capture_output=True, text=True, check=True).stdout.split()
     bw, bh = int(big[0]), int(big[1])
-    w = max(1, round(bw / SS))
+    w = max(1, round(bw / SS * PIXEL_ASPECT))
     raw = subprocess.run(
         ["magick", "-background", "black", "-fill", "white", "-font", FONT,
          "-pointsize", str(h * SS * 1.18), f"label:{word}",

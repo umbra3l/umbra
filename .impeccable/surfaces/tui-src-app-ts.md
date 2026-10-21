@@ -34,7 +34,7 @@ OWN-WORLD:
 STORY: In one glance you know which tool is up, where it will run (project or sandbox home), the egress mode, live sessions (rings), and what the last session changed. One keystroke launches; returning shows what happened, with a warning when host-executed files changed.
 
 FIRST VIEWPORT (wide):
-- Header: ● umbra v2.0 on the left; egress mode · vCPU · RAM on the right.
+- Header: ● umbra v2.1 on the left; egress mode · vCPU · RAM on the right.
 - Left ~55%: the orrery inside four registration ticks. Core centred, three tilted orbits, the selected body large at the front.
 - Right: the tool name at display scale; a subline with full name, version and concurrency; a last-session line; then seven keyed actions with the focused one as a pill.
 - Bottom: a status line with ◆ project + branch · snapshots · live sessions, and key hints.

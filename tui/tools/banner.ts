@@ -79,7 +79,7 @@ text("─┘", O.x + O.w - 1, O.y + O.h, theme.hair)
 const TX = O.x + O.w + 6
 const bakeWord = (h: number): Bitmap =>
   JSON.parse(Bun.spawnSync(["python3", "-I", `${import.meta.dir}/bake-type.py`, "--word", "umbra", "--height", String(h)]).stdout.toString())
-// the largest size whose width leaves room for "v2.0" beside it
+// the largest size whose width leaves room for "v2.1" beside it
 let word = bakeWord(24)
 for (let h = 23; word.w > W - TX - 8 && h > 8; h--) word = bakeWord(h)
 const tools: [string, string][] = [
@@ -90,7 +90,7 @@ const tools: [string, string][] = [
 const blockH = word.h / 2 + 1 + 1 + 1 + 1 + tools.length
 let y = Math.floor((H - blockH) / 2) - 1
 drawWord(buf as never, word, TX, y, theme.fg, bg)
-text("v2.0", TX + word.w + 2, y + word.h / 2 - 1, theme.dim)
+text("v2.1", TX + word.w + 2, y + word.h / 2 - 1, theme.dim)
 y += word.h / 2 + 1
 text("Your AI coding CLIs, each in its own microVM.", TX, y, theme.fg, { bold: true })
 y += 1

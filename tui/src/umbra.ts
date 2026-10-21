@@ -6,7 +6,7 @@ import type { CliRenderer } from "@opentui/core"
 // `umbra` CLI (bin/umbra), which owns the VM, jail, egress proxy and
 // snapshots. bin/umbra passes its own path and version in when it starts us.
 export const UMBRA_BIN = process.env.UMBRA_BIN || `${homedir()}/.config/umbra/bin/umbra`
-export const UMBRA_VERSION = process.env.UMBRA_VERSION || "2.0.0"
+export const UMBRA_VERSION = process.env.UMBRA_VERSION || "2.1.0"
 export const EGRESS_LOG = process.env.UMBRA_EGRESS_LOG || `${homedir()}/.local/share/umbra/logs/egress.log`
 export const REDUCED_MOTION = process.env.UMBRA_REDUCED_MOTION === "1" || process.env.NO_MOTION === "1"
 

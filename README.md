@@ -1,10 +1,10 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/banner-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="docs/banner-light.png">
-  <img alt="umbra v2.0: claude, opencode and agy orbiting a sealed core, beside the umbra wordmark" src="docs/banner-dark.png" width="100%">
+  <img alt="umbra v2.1: claude, opencode and agy orbiting a sealed core, beside the umbra wordmark" src="docs/banner-dark.png" width="100%">
 </picture>
 
-# umbra v2.0
+# umbra v2.1
 
 A microVM sandbox for AI coding CLIs (**Claude Code**, **Antigravity `agy`**,
 **OpenCode**) that you use exactly like the bare CLIs:
@@ -257,7 +257,7 @@ VMs, or into your shell.
 ├── seccomp/umbra-seccomp.c VMM syscall denylist
 ├── egress/                 defaults.allow, defaults.deny, your allow / deny
 ├── secrets/<tool>.env      per-tool secrets (mode 600, gitignored; *.example templates)
-├── tui/                    the umbra v2.0 TUI (OpenTUI/Bun)
+├── tui/                    the umbra v2.1 TUI (OpenTUI/Bun)
 ├── docs/banner-*.png       README banner, drawn by the TUI's own code (tui/tools/banner.ts)
 ├── shell/umbra.fish|bash   claude / agy / opencode wrappers
 ├── umbra.conf              shipped defaults

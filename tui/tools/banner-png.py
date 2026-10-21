@@ -55,6 +55,18 @@ for y, r in enumerate(rows):
             continue
         if ch == "▀":
             d.rectangle([X, Y, X + CW - 1, Y + CH // 2 - 1], fill=fg)
+        elif 0x2581 <= o <= 0x2587:  # lower k/8 blocks, as kitty draws them
+            k = o - 0x2580
+            d.rectangle([X, Y + round(CH * (8 - k) / 8), X + CW - 1, Y + CH - 1], fill=fg)
+        elif 0x2589 <= o <= 0x258F:  # left k/8 blocks
+            k = 0x2590 - o
+            d.rectangle([X, Y, X + round(CW * k / 8) - 1, Y + CH - 1], fill=fg)
+        elif ch in "▘▝▖▗▚":
+            hw, hh = CW // 2, CH // 2
+            quads = {"▘": [(0, 0)], "▝": [(1, 0)], "▖": [(0, 1)], "▗": [(1, 1)], "▚": [(0, 0), (1, 1)]}[ch]
+            for qx, qy in quads:
+                d.rectangle([X + qx * hw, Y + qy * hh, X + (qx + 1) * hw - 1 if qx == 0 else X + CW - 1,
+                             Y + (qy + 1) * hh - 1 if qy == 0 else Y + CH - 1], fill=fg)
         elif 0x2800 <= o <= 0x28FF:
             for i, (bx, by) in enumerate(BR):
                 if (o - 0x2800) & (1 << i):

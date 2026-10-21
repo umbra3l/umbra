@@ -22,7 +22,9 @@ export interface BodyState {
 
 const TILT = -0.24 // radians, orbit plane leaning left
 const FRONT = Math.PI / 2 // nearest point to the viewer (bottom of the ellipse)
-const ORBIT_K = [0.66, 0.84, 1.0]
+// Orbit radii as fractions of the outermost. Evenly spread from just outside
+// the corona, so the system reads as three distinct lanes, not one band.
+const ORBIT_K = [0.56, 0.78, 1.0]
 const DRIFT = [0.021, 0.014, 0.01] // rad/s: one lap in 5 to 10 minutes
 
 export const expoOut = (t: number): number => (t >= 1 ? 1 : 1 - 2 ** (-10 * t))
@@ -30,11 +32,18 @@ export const cubicInOut = (t: number): number => (t < 0.5 ? 4 * t * t * t : 1 - 
 
 interface Body {
   angle: number
-  from: number
-  to: number
-  t: number // swing progress 0..1 (1 = settled)
+  vel: number // rad/s, for the swing spring
+  to: number // where the swing is heading
+  moving: boolean
+  sel: number // 0..1, eased selection: size, glow and brightness crossfade
   appear: number // entrance 0..1
 }
+
+// The swing is a critically damped spring, not a timed ease: it starts
+// gently, never overshoots, and pressing again mid-swing retargets it with
+// its momentum intact instead of restarting from a standstill. OMEGA sets
+// the pace (most of the turn lands in ~0.45 s, settled by ~0.8 s).
+const OMEGA = 8.5
 
 export interface Label {
   index: number
@@ -51,6 +60,8 @@ export class Orrery {
   private selected = 0
   private clock = 0
   private entrance = 0 // 0..1, orbits drawing on
+  /** The core's centre and radius from the last draw, in dot space. */
+  core = { x: 0, y: 0, r: 0 }
   private emerge = 1 // 0..1 after a session
   private flare = 0 // corona flare after a session
   private sweep = -1 // >= 0 while an audit runs (angle)
@@ -61,9 +72,9 @@ export class Orrery {
     for (let i = 0; i < count; i++) {
       // Spread the bodies so the first frame already reads as a system.
       const a = FRONT + (i * Math.PI * 2) / count + 0.6 * i
-      this.bodies.push({ angle: a, from: a, to: a, t: 1, appear: reduced ? 1 : 0 })
+      this.bodies.push({ angle: a, vel: 0, to: a, moving: false, sel: i === 0 ? 1 : 0, appear: reduced ? 1 : 0 })
     }
-    this.bodies[0]!.angle = FRONT
+    this.bodies[0]!.angle = this.bodies[0]!.to = FRONT
     this.entrance = reduced ? 1 : 0
   }
 
@@ -73,7 +84,7 @@ export class Orrery {
       this.emerge < 1 ||
       this.flare > 0.01 ||
       this.sweep >= 0 ||
-      this.bodies.some((b) => b.t < 1 || b.appear < 1)
+      this.bodies.some((b, i) => b.moving || b.appear < 1 || Math.abs(b.sel - (i === this.selected ? 1 : 0)) > 0.002)
     )
   }
 
@@ -83,7 +94,9 @@ export class Orrery {
     const sel = this.bodies[i]!
     // The system turns: every body moves by the same forward-wrapped delta,
     // so the chosen one swings to the front and the previous one leaves it.
-    let delta = (FRONT - sel.angle) % (Math.PI * 2)
+    // Measured from where the swing is already heading, so quick repeated
+    // presses add up instead of fighting the turn in progress.
+    let delta = (FRONT - sel.to) % (Math.PI * 2)
     if (delta < 0) delta += Math.PI * 2
     if (delta > Math.PI * 1.5) delta -= Math.PI * 2
     const TAU = Math.PI * 2
@@ -92,16 +105,18 @@ export class Orrery {
       return d > Math.PI ? d - TAU : d
     }
     this.bodies.forEach((b, k) => {
-      let to = b.angle + delta
+      let to = b.to + delta
       if (k !== i) {
         // Keep the front clear for the chosen body.
         const g = gap(to)
         if (Math.abs(g) < 1.0) to += (g >= 0 ? 1 : -1) * (1.0 - Math.abs(g))
       }
-      b.from = b.angle
       b.to = to
-      b.t = this.reduced ? 1 : 0
-      if (this.reduced) b.angle = to
+      b.moving = !this.reduced
+      if (this.reduced) {
+        b.angle = to
+        b.vel = 0
+      }
     })
   }
 
@@ -124,16 +139,28 @@ export class Orrery {
     if (this.sweep >= 0) this.sweep = (this.sweep + dt * 3.2) % (Math.PI * 2)
     this.bodies.forEach((b, i) => {
       if (b.appear < 1) b.appear = Math.min(1, b.appear + dt / (0.45 + i * 0.12))
-      if (b.t < 1) {
-        b.t = Math.min(1, b.t + dt / 0.6)
-        b.angle = b.from + (b.to - b.from) * expoOut(b.t)
+      const want = i === this.selected ? 1 : 0
+      b.sel = this.reduced ? want : b.sel + (want - b.sel) * (1 - Math.exp(-dt * 9))
+      if (b.moving) {
+        // Substeps keep the spring stable through a slow frame (dt <= 0.1).
+        const n = Math.ceil(dt / (1 / 120))
+        const h = dt / n
+        for (let k = 0; k < n; k++) {
+          b.vel += (OMEGA * OMEGA * (b.to - b.angle) - 2 * OMEGA * b.vel) * h
+          b.angle += b.vel * h
+        }
+        if (Math.abs(b.to - b.angle) < 2e-3 && Math.abs(b.vel) < 2e-2) {
+          b.angle = b.to
+          b.vel = 0
+          b.moving = false
+        }
       } else if (i !== this.selected && !this.reduced) {
         // Drift, but never into the front window the chosen body owns.
         const next = b.angle + DRIFT[i % DRIFT.length]! * dt
         const d = ((((next - FRONT) % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2))
-        if (d > 0.9 && d < Math.PI * 2 - 0.9) b.angle = next
+        if (d > 0.9 && d < Math.PI * 2 - 0.9) b.angle = b.to = next
       } else if (i === this.selected) {
-        b.angle = FRONT + Math.round((b.angle - FRONT) / (Math.PI * 2)) * Math.PI * 2
+        b.angle = b.to = FRONT + Math.round((b.angle - FRONT) / (Math.PI * 2)) * Math.PI * 2
       }
     })
   }
@@ -156,15 +183,17 @@ export class Orrery {
     const cy = rect.y + rect.h / 2
     // Lean the orbital plane toward the viewer when there is vertical room
     // (wide terminals), flatter when there isn't (tall tiles).
-    const flat = Math.max(0.34, Math.min(0.6, (rect.h * 0.4) / (rect.w * 0.46)))
+    const flat = Math.max(0.42, Math.min(0.8, (rect.h * 0.44) / (rect.w * 0.46)))
     const extent = Math.hypot(Math.sin(TILT), flat * Math.cos(TILT))
     const rxMax = Math.max(14, Math.min(rect.w * 0.46, (rect.h * 0.45) / extent))
     const coreR = Math.max(5, rxMax * 0.15)
+    this.core = { x: cx, y: cy, r: coreR }
     const bodyR = Math.max(3, rxMax * 0.056)
     const ease = cubicInOut(this.entrance)
     const sel = state[this.selected]
     const selInk = sel ? theme.tool[sel.key] ?? theme.fg : theme.fg
     const labels: Label[] = []
+    const cellH = 4 * cv.aspect // dot-space units per cell row
 
     // Faint fixed stars, sparse, for depth only.
     let seed = 7
@@ -209,16 +238,16 @@ export class Orrery {
         scale *= 0.35 + 0.65 * e
         behindCore = Math.hypot(p.x - cx, p.y - cy) < coreR + bodyR * 0.5
       }
-      const r = bodyR * (0.72 + 0.43 * p.depth) * (i === this.selected ? 1.3 : 1) * scale
-      return { s, i, p, r, behindCore }
+      const r = bodyR * (0.72 + 0.43 * p.depth) * (1 + 0.3 * b.sel) * scale
+      return { s, i, p, r, behindCore, sel: b.sel }
     })
 
     const drawBody = (o: (typeof bodies)[number]) => {
       const ink = theme.tool[o.s.key] ?? theme.fg
       const isSel = o.i === this.selected
-      const depthFade = (1 - o.p.depth) * 0.45 + (isSel ? 0 : 0.18)
+      const depthFade = (1 - o.p.depth) * 0.45 + 0.18 * (1 - o.sel)
       if (o.s.installed) {
-        if (isSel) cv.glow(o.p.x, o.p.y, o.r * 1.05, o.r * 2.1, shade(ink), bg, 0.2)
+        if (o.sel > 0.02) cv.glow(o.p.x, o.p.y, o.r * 1.05, o.r * 2.1, shade(ink), bg, 0.2 * o.sel)
         cv.clearFront(o.p.x, o.p.y, o.r)
         cv.disc(o.p.x, o.p.y, o.r, shade(ink, depthFade), bg)
       } else {
@@ -233,7 +262,7 @@ export class Orrery {
         index: o.i,
         key: o.s.key,
         x: Math.round((o.p.x + o.r + 3) / 2),
-        y: Math.round(o.p.y / 4),
+        y: Math.round(o.p.y / cellH),
         selected: isSel,
         live: o.s.live,
         installed: o.s.installed,
@@ -284,8 +313,8 @@ export class Orrery {
         if (o.i === l.index) return false
         const bx0 = (o.p.x - o.r) / 2
         const bx1 = (o.p.x + o.r) / 2
-        const by0 = (o.p.y - o.r) / 4
-        const by1 = (o.p.y + o.r) / 4
+        const by0 = (o.p.y - o.r) / cellH
+        const by1 = (o.p.y + o.r) / cellH
         return l.y >= Math.floor(by0) && l.y <= Math.ceil(by1) && l.x <= bx1 && l.x + len >= bx0
       })
     })

@@ -6,9 +6,11 @@ import { mix, rgba, type RGB } from "./color"
 //     Two layers: back (behind fills) and front (drawn over fills).
 //   - "fill": half-blocks, 1x2 per cell, for solid shapes with soft,
 //     colour-blended edges (core, corona glow, bodies).
-// Coordinates for drawing calls are in dot space (2*cols x 4*rows), whose
-// pixels are roughly square in common terminal fonts; a fill pixel is a
-// 2x2 block of dots.
+// Coordinates for drawing calls are in dot space: x runs 0..2*cols, y runs
+// 0..4*rows*aspect. `aspect` is a dot's height over its width (cell height /
+// width / 2): 1 for a 1:2 cell, ~1.14 for JetBrains Mono in kitty. Drawing
+// in these square units and mapping y back to dot rows keeps circles round
+// in every font. A fill pixel is a 2x2 block of dots.
 
 const BRAILLE = [
   [0x01, 0x08],
@@ -22,6 +24,7 @@ export type Layer = "back" | "front"
 export class DotCanvas {
   cols = 0
   rows = 0
+  aspect = 1
   private backBits = new Uint8Array(0)
   private frontBits = new Uint8Array(0)
   private backInk: (RGB | null)[] = []
@@ -55,12 +58,12 @@ export class DotCanvas {
     return this.cols * 2
   }
   get height(): number {
-    return this.rows * 4
+    return this.rows * 4 * this.aspect
   }
 
   dot(x: number, y: number, ink: RGB, layer: Layer = "back"): void {
     const xi = Math.floor(x)
-    const yi = Math.floor(y)
+    const yi = Math.floor(y / this.aspect)
     if (xi < 0 || yi < 0 || xi >= this.cols * 2 || yi >= this.rows * 4) return
     const cell = (yi >> 2) * this.cols + (xi >> 1)
     const bit = BRAILLE[yi & 3]![xi & 1]!
@@ -90,8 +93,9 @@ export class DotCanvas {
     if (r <= 0.2 || alpha <= 0) return
     const hx0 = Math.max(0, Math.floor((cx - r) / 2) - 1)
     const hx1 = Math.min(this.cols - 1, Math.ceil((cx + r) / 2) + 1)
-    const hy0 = Math.max(0, Math.floor((cy - r) / 2) - 1)
-    const hy1 = Math.min(this.rows * 2 - 1, Math.ceil((cy + r) / 2) + 1)
+    const a = this.aspect
+    const hy0 = Math.max(0, Math.floor((cy - r) / a / 2) - 1)
+    const hy1 = Math.min(this.rows * 2 - 1, Math.ceil((cy + r) / a / 2) + 1)
     for (let hy = hy0; hy <= hy1; hy++) {
       for (let hx = hx0; hx <= hx1; hx++) {
         // 4x4 supersampling over the 2x2-dot pixel
@@ -99,7 +103,7 @@ export class DotCanvas {
         for (let sy = 0; sy < 4; sy++) {
           for (let sx = 0; sx < 4; sx++) {
             const px = hx * 2 + (sx + 0.5) / 2
-            const py = hy * 2 + (sy + 0.5) / 2
+            const py = (hy * 2 + (sy + 0.5) / 2) * a
             const dx = px - cx
             const dy = py - cy
             if (dx * dx + dy * dy <= r * r) inside++
@@ -118,11 +122,12 @@ export class DotCanvas {
     if (strength <= 0 || r1 <= r0) return
     const hx0 = Math.max(0, Math.floor((cx - r1) / 2))
     const hx1 = Math.min(this.cols - 1, Math.ceil((cx + r1) / 2))
-    const hy0 = Math.max(0, Math.floor((cy - r1) / 2))
-    const hy1 = Math.min(this.rows * 2 - 1, Math.ceil((cy + r1) / 2))
+    const asp = this.aspect
+    const hy0 = Math.max(0, Math.floor((cy - r1) / asp / 2))
+    const hy1 = Math.min(this.rows * 2 - 1, Math.ceil((cy + r1) / asp / 2))
     for (let hy = hy0; hy <= hy1; hy++) {
       for (let hx = hx0; hx <= hx1; hx++) {
-        const d = Math.hypot(hx * 2 + 1 - cx, hy * 2 + 1 - cy)
+        const d = Math.hypot(hx * 2 + 1 - cx, (hy * 2 + 1) * asp - cy)
         if (d < r0 || d > r1) continue
         const t = (d - r0) / (r1 - r0)
         const a = strength * (1 - t) * (1 - t)
@@ -193,12 +198,13 @@ export class DotCanvas {
   clearFront(cx: number, cy: number, r: number): void {
     const x0 = Math.max(0, Math.floor(cx - r - 1))
     const x1 = Math.min(this.cols * 2 - 1, Math.ceil(cx + r + 1))
-    const y0 = Math.max(0, Math.floor(cy - r - 1))
-    const y1 = Math.min(this.rows * 4 - 1, Math.ceil(cy + r + 1))
+    const a = this.aspect
+    const y0 = Math.max(0, Math.floor((cy - r) / a - 1))
+    const y1 = Math.min(this.rows * 4 - 1, Math.ceil((cy + r) / a + 1))
     for (let y = y0; y <= y1; y++) {
       for (let x = x0; x <= x1; x++) {
         const dx = x + 0.5 - cx
-        const dy = y + 0.5 - cy
+        const dy = (y + 0.5) * a - cy
         if (dx * dx + dy * dy > (r + 0.6) * (r + 0.6)) continue
         const cell = (y >> 2) * this.cols + (x >> 1)
         this.frontBits[cell]! &= ~BRAILLE[y & 3]![x & 1]!
